@@ -780,7 +780,7 @@ def get_lineas_totales_por_invernadero(invernadero_id, invernadero_nombre):
         if 1 <= numero <= 8:
             return 40
         elif 9 <= numero <= 11:
-            return 39
+            return 36
     return 40
 
 def get_ultimo_avance_dia(invernadero_id, fecha=None):
@@ -1022,9 +1022,9 @@ def get_avance_cosecha(fecha=None, invernadero_id=None, turno=None):
 def guardar_cosecha(data):
     try:
         if data['presentacion'] == "12 oz":
-            numero_cajas = data['cantidad_clams'] / 12
-        else:
             numero_cajas = data['cantidad_clams'] / 6
+        else:
+            numero_cajas = data['cantidad_clams'] / 12
         
         result = supabase.table('cosechas').insert({
             'fecha': data['fecha'].isoformat() if isinstance(data['fecha'], date) else data['fecha'],
