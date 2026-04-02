@@ -2433,35 +2433,35 @@ def escanear_qr_con_camara(tipo_evento="asistencia", mostrar_invernadero=False):
                 else:
                     st.warning(f"⚠️ Trabajador no encontrado: {result['nombre']}")
     
-     webrtc_ctx = webrtc_streamer(
-        key=f"qr-scanner-{st.session_state.webrtc_key}",
-        mode=WebRtcMode.SENDRECV,
-        video_processor_factory=QRVideoProcessor,
-        media_stream_constraints={"video": True, "audio": False},
-        async_processing=True,
-        rtc_configuration={
-            "iceServers": [
-                {"urls": ["stun:stun.l.google.com:19302"]},
-                {"urls": ["stun:stun1.l.google.com:19302"]},
-                {"urls": ["stun:stun2.l.google.com:19302"]},
-                # Si tienes un TURN server (recomendado para producción)
-                # {
-                #     "urls": ["turn:tu-turn-server.com:3478"],
-                #     "username": "usuario",
-                #     "credential": "contraseña"
-                # }
-            ]
-        },
-    )
-        
-        with st.expander("📖 Instrucciones de uso"):
-            st.markdown("""
-            1. **Permite el acceso a la cámara** cuando el navegador lo solicite
-            2. **Coloca el código QR frente a la cámara** a una distancia adecuada
-            3. **Espera a que se detecte** - verás un rectángulo verde alrededor del QR
-            4. **Automáticamente se abrirá el formulario** para completar el registro
-            5. Si no funciona, presiona **Reiniciar Escaneo**
-            """)
+         webrtc_ctx = webrtc_streamer(
+            key=f"qr-scanner-{st.session_state.webrtc_key}",
+            mode=WebRtcMode.SENDRECV,
+            video_processor_factory=QRVideoProcessor,
+            media_stream_constraints={"video": True, "audio": False},
+            async_processing=True,
+            rtc_configuration={
+                "iceServers": [
+                    {"urls": ["stun:stun.l.google.com:19302"]},
+                    {"urls": ["stun:stun1.l.google.com:19302"]},
+                    {"urls": ["stun:stun2.l.google.com:19302"]},
+                    # Si tienes un TURN server (recomendado para producción)
+                    # {
+                    #     "urls": ["turn:tu-turn-server.com:3478"],
+                    #     "username": "usuario",
+                    #     "credential": "contraseña"
+                    # }
+                ]
+            },
+        )
+            
+            with st.expander("📖 Instrucciones de uso"):
+                st.markdown("""
+                1. **Permite el acceso a la cámara** cuando el navegador lo solicite
+                2. **Coloca el código QR frente a la cámara** a una distancia adecuada
+                3. **Espera a que se detecte** - verás un rectángulo verde alrededor del QR
+                4. **Automáticamente se abrirá el formulario** para completar el registro
+                5. Si no funciona, presiona **Reiniciar Escaneo**
+                """)
 # ==========================================
 # FUNCIONES DE DASHBOARD Y REPORTES (SUPABASE)
 # ==========================================
