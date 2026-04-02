@@ -2267,201 +2267,173 @@ class QRVideoProcessor(VideoProcessorBase):
 # FUNCIÓN PRINCIPAL DE ESCANEO QR CON WEBRTC
 # ==========================================
 def escanear_qr_con_camara(tipo_evento="asistencia", mostrar_invernadero=False):
-    """Escanea QR usando streamlit-webrtc"""
+    """Versión que funciona en Streamlit Cloud con OpenCV"""
     
-    st.markdown("### 📷 Escaneo Automático con Cámara")
+    st.markdown("### 📷 Escaneo con Cámara")
     
-    # Inicializar estado de sesión
-    if 'qr_scanned_data' not in st.session_state:
-        st.session_state.qr_scanned_data = None
-    if 'qr_scan_completed' not in st.session_state:
-        st.session_state.qr_scan_completed = False
-    if 'webrtc_key' not in st.session_state:
-        st.session_state.webrtc_key = 0
+    # Usar file_uploader para subir imagen (más confiable en la nube)
+    st.info("📸 Opción 1: Sube una foto del código QR")
+    uploaded_file = st.file_uploader("Selecciona una imagen del QR", type=["png", "jpg", "jpeg"], key="qr_upload")
     
-    # Botón para reiniciar
-    col1, col2, col3 = st.columns([1, 2, 1])
+    if uploaded_file:
+        from PIL import Image
+        image = Image.open(uploaded_file)
+        st.image(image, caption="Imagen subida", width=200)
+        
+        # Decodificar QR
+        qr_codes = decode(np.array(image))
+        
+        if qr_codes:
+            for qr in qr_codes:
+                qr_data = qr.data.decode('utf-8')
+                id_trabajador, nombre = procesar_qr_data(qr_data)
+                
+                if id_trabajador and nombre:
+                    trabajador = get_worker_by_id(id_trabajador)
+                    if trabajador:
+                        st.success(f"✅ QR Detectado: {nombre}")
+                        
+                        # Mostrar formulario según tipo de evento
+                        if tipo_evento == "cosecha":
+                            return mostrar_formulario_cosecha_qr(id_trabajador, nombre, mostrar_invernadero)
+                        elif tipo_evento == "asistencia":
+                            return mostrar_formulario_asistencia_qr(id_trabajador, nombre)
+                    else:
+                        st.error(f"❌ Trabajador no encontrado: {nombre}")
+                else:
+                    st.error("❌ QR no válido")
+        else:
+            st.error("❌ No se detectó ningún código QR en la imagen")
+    
+    st.markdown("---")
+    st.info("📱 Opción 2: Escanea con la cámara de tu celular")
+    st.markdown("""
+    1. Abre la cámara de tu celular
+    2. Escanea el código QR
+    3. Se abrirá automáticamente el formulario
+    """)
+
+def mostrar_formulario_cosecha_qr(id_trabajador, nombre, mostrar_invernadero):
+    """Muestra formulario de cosecha después del escaneo QR"""
+    st.markdown("### 📋 Registrar Cosecha")
+    
+    invernadero_id = None
+    if mostrar_invernadero:
+        invernaderos = get_invernaderos()
+        if invernaderos:
+            invernadero = st.selectbox("🏭 Invernadero:", invernaderos, 
+                                       format_func=lambda x: f"{x[1]} - {x[2]}", 
+                                       key="invernadero_qr_final")
+            invernadero_id = invernadero[0]
+        else:
+            st.warning("No hay invernaderos registrados")
+    
+    fecha_actual = datetime.now()
+    dias_espanol = {'Monday': 'Lunes', 'Tuesday': 'Martes', 'Wednesday': 'Miércoles',
+                    'Thursday': 'Jueves', 'Friday': 'Viernes', 'Saturday': 'Sábado', 'Sunday': 'Domingo'}
+    dia_espanol = dias_espanol[fecha_actual.strftime('%A')]
+    
+    col1, col2, col3 = st.columns(3)
+    with col1: st.write(f"**Fecha:** {fecha_actual.strftime('%d/%m/%Y')}")
+    with col2: st.write(f"**Día:** {dia_espanol}")
+    with col3: st.write(f"**Semana:** {fecha_actual.isocalendar()[1]}")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        tipo_cosecha = st.selectbox("Tipo de Cosecha:", ["Nacional", "Exportación"], key="tipo_qr_final")
+        if tipo_cosecha == "Nacional":
+            calidad = st.selectbox("Calidad:", ["Salmon", "Sobretono"], key="calidad_qr_final")
+        else:
+            calidad = None
+    
     with col2:
-        if st.button("🔄 Reiniciar Escaneo", use_container_width=True, key="btn_reiniciar_scan_webrtc"):
-            st.session_state.qr_scanned_data = None
-            st.session_state.qr_scan_completed = False
-            st.session_state.webrtc_key += 1
-            st.rerun()
+        if tipo_cosecha == "Exportación":
+            presentacion = st.selectbox("Presentación:", ["6 oz", "12 oz"], key="pres_qr_final")
+        else:
+            presentacion = "6 oz"
+            st.info("✅ Presentación automática: 6 oz")
     
-    # Si ya se escaneó, mostrar formulario
-    if st.session_state.qr_scan_completed and st.session_state.qr_scanned_data:
-        datos = st.session_state.qr_scanned_data
-        st.success(f"✅ QR Detectado: {datos['nombre']} (ID: {datos['id']})")
-        
-        if tipo_evento == "cosecha":
-            st.markdown("### 📋 Registrar Cosecha")
-            
-            invernadero_id = None
-            if mostrar_invernadero:
-                invernaderos = get_invernaderos()
-                if invernaderos:
-                    invernadero = st.selectbox("🏭 Invernadero:", invernaderos, 
-                                               format_func=lambda x: f"{x[1]} - {x[2]}", 
-                                               key="invernadero_qr_webrtc")
-                    invernadero_id = invernadero[0]
-                else:
-                    st.warning("No hay invernaderos registrados")
-            
-            fecha_actual = datetime.now()
-            dias_espanol = {'Monday': 'Lunes', 'Tuesday': 'Martes', 'Wednesday': 'Miércoles',
-                            'Thursday': 'Jueves', 'Friday': 'Viernes', 'Saturday': 'Sábado', 'Sunday': 'Domingo'}
-            dia_espanol = dias_espanol[fecha_actual.strftime('%A')]
-            
-            col1, col2, col3 = st.columns(3)
-            with col1: st.write(f"**Fecha:** {fecha_actual.strftime('%d/%m/%Y')}")
-            with col2: st.write(f"**Día:** {dia_espanol}")
-            with col3: st.write(f"**Semana:** {fecha_actual.isocalendar()[1]}")
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                tipo_cosecha = st.selectbox("Tipo de Cosecha:", ["Nacional", "Exportación"], key="tipo_qr_webrtc")
-                if tipo_cosecha == "Nacional":
-                    calidad = st.selectbox("Calidad:", ["Salmon", "Sobretono"], key="calidad_qr_webrtc")
-                else:
-                    calidad = None
-            
-            with col2:
-                if tipo_cosecha == "Exportación":
-                    presentacion = st.selectbox("Presentación:", ["6 oz", "12 oz"], key="pres_qr_webrtc")
-                else:
-                    presentacion = "6 oz"
-                    st.info("✅ Presentación automática: 6 oz")
-            
-            cantidad_clams = st.number_input("Cantidad de Clams:", min_value=0.0, value=0.0, step=1.0, key="clams_qr_webrtc")
-            
-            if presentacion == "12 oz":
-                cajas_calculadas = cantidad_clams / 12 if cantidad_clams > 0 else 0
+    cantidad_clams = st.number_input("Cantidad de Clams:", min_value=0.0, value=0.0, step=1.0, key="clams_qr_final")
+    
+    if presentacion == "12 oz":
+        cajas_calculadas = cantidad_clams / 12 if cantidad_clams > 0 else 0
+    else:
+        cajas_calculadas = cantidad_clams / 6 if cantidad_clams > 0 else 0
+    
+    st.text_input("Número de Cajas:", value=f"{cajas_calculadas:.2f}", disabled=True, key="cajas_qr_final")
+    st.info(f"👤 Trabajador: {nombre}")
+    
+    if st.button("💾 Guardar Cosecha", type="primary", use_container_width=True, key="guardar_qr_final"):
+        if cantidad_clams <= 0:
+            st.error("Ingrese una cantidad válida de clams")
+        elif not invernadero_id and mostrar_invernadero:
+            st.error("❌ Seleccione un invernadero")
+        else:
+            data = {
+                'fecha': fecha_actual.date(), 
+                'dia': dia_espanol, 
+                'semana': fecha_actual.isocalendar()[1],
+                'trabajador_id': int(id_trabajador), 
+                'invernadero_id': invernadero_id,
+                'tipo_cosecha': tipo_cosecha, 
+                'calidad': calidad,
+                'presentacion': presentacion,
+                'cantidad_clams': float(cantidad_clams)
+            }
+            success, msg = guardar_cosecha(data)
+            if success:
+                st.success(msg)
+                st.balloons()
+                st.rerun()
             else:
-                cajas_calculadas = cantidad_clams / 6 if cantidad_clams > 0 else 0
-            
-            st.text_input("Número de Cajas:", value=f"{cajas_calculadas:.2f}", disabled=True, key="cajas_qr_webrtc")
-            
-            if st.button("💾 Guardar Cosecha", type="primary", use_container_width=True, key="guardar_qr_webrtc"):
-                if cantidad_clams <= 0:
-                    st.error("Ingrese una cantidad válida de clams")
-                elif not invernadero_id and mostrar_invernadero:
-                    st.error("❌ Seleccione un invernadero")
-                else:
-                    data = {
-                        'fecha': fecha_actual.date(), 
-                        'dia': dia_espanol, 
-                        'semana': fecha_actual.isocalendar()[1],
-                        'trabajador_id': int(datos['id']), 
-                        'invernadero_id': invernadero_id,
-                        'tipo_cosecha': tipo_cosecha, 
-                        'calidad': calidad,
-                        'presentacion': presentacion,
-                        'cantidad_clams': float(cantidad_clams)
-                    }
-                    success, msg = guardar_cosecha(data)
-                    if success:
-                        st.success(msg)
-                        st.balloons()
-                        st.session_state.qr_scanned_data = None
-                        st.session_state.qr_scan_completed = False
-                        st.rerun()
-                    else:
-                        st.error(msg)
-        
-        elif tipo_evento == "asistencia":
-            st.markdown("### 📋 Registrar Evento de Asistencia")
-            
-            invernaderos = get_invernaderos()
-            if invernaderos:
-                invernadero = st.selectbox(
-                    "🏭 Invernadero:", 
-                    invernaderos, 
-                    format_func=lambda x: f"{x[1]} - {x[2]}",
-                    key="invernadero_asistencia_webrtc"
-                )
-                invernadero_id = invernadero[0]
-            else:
-                invernadero_id = None
-                st.warning("No hay invernaderos registrados")
-            
-            tipo_evento_select = st.selectbox(
-                "📌 Tipo de Evento:", 
-                ["entrada_invernadero", "salida_comer", "regreso_comida", "salida_invernadero"],
-                format_func=lambda x: {
-                    'entrada_invernadero': '🚪 Entrada a Invernadero', 
-                    'salida_comer': '🍽️ Salida a Comer',
-                    'regreso_comida': '✅ Regreso de Comida', 
-                    'salida_invernadero': '🚪 Salida'
-                }[x],
-                key="tipo_asistencia_webrtc"
-            )
-            
-            st.info(f"👤 Trabajador: {datos['nombre']} (ID: {datos['id']})")
-            
-            if st.button("✅ Registrar Evento", type="primary", use_container_width=True, key="registrar_asistencia_webrtc"):
-                if tipo_evento_select == 'entrada_invernadero' and not invernadero_id:
-                    st.error("❌ Seleccione un invernadero")
-                else:
-                    success, msg = registrar_evento_asistencia(
-                        int(datos['id']), 
-                        invernadero_id if tipo_evento_select == 'entrada_invernadero' else None, 
-                        tipo_evento_select
-                    )
-                    if success:
-                        st.success(msg)
-                        st.balloons()
-                        st.session_state.qr_scanned_data = None
-                        st.session_state.qr_scan_completed = False
-                        st.rerun()
-                    else:
-                        st.error(msg)
-        
-        return
+                st.error(msg)
+
+def mostrar_formulario_asistencia_qr(id_trabajador, nombre):
+    """Muestra formulario de asistencia después del escaneo QR"""
+    st.markdown("### 📋 Registrar Evento de Asistencia")
     
-    # Mostrar cámara
-    st.info("📷 Acerca un código QR a la cámara")
-    
-    def process_qr_result():
-        if hasattr(webrtc_ctx, 'video_processor') and webrtc_ctx.video_processor:
-            result = webrtc_ctx.video_processor.get_result()
-            if result and not st.session_state.qr_scan_completed:
-                trabajador = get_worker_by_id(int(result['id']))
-                if trabajador:
-                    st.session_state.qr_scanned_data = result
-                    st.session_state.qr_scan_completed = True
-                    st.rerun()
-                else:
-                    st.warning(f"⚠️ Trabajador no encontrado: {result['nombre']}")
-    
-         webrtc_ctx = webrtc_streamer(
-            key=f"qr-scanner-{st.session_state.webrtc_key}",
-            mode=WebRtcMode.SENDRECV,
-            video_processor_factory=QRVideoProcessor,
-            media_stream_constraints={"video": True, "audio": False},
-            async_processing=True,
-            rtc_configuration={
-                "iceServers": [
-                    {"urls": ["stun:stun.l.google.com:19302"]},
-                    {"urls": ["stun:stun1.l.google.com:19302"]},
-                    {"urls": ["stun:stun2.l.google.com:19302"]},
-                    # Si tienes un TURN server (recomendado para producción)
-                    # {
-                    #     "urls": ["turn:tu-turn-server.com:3478"],
-                    #     "username": "usuario",
-                    #     "credential": "contraseña"
-                    # }
-                ]
-            },
+    invernaderos = get_invernaderos()
+    if invernaderos:
+        invernadero = st.selectbox(
+            "🏭 Invernadero:", 
+            invernaderos, 
+            format_func=lambda x: f"{x[1]} - {x[2]}",
+            key="invernadero_asistencia_final"
         )
-            
-            with st.expander("📖 Instrucciones de uso"):
-                st.markdown("""
-                1. **Permite el acceso a la cámara** cuando el navegador lo solicite
-                2. **Coloca el código QR frente a la cámara** a una distancia adecuada
-                3. **Espera a que se detecte** - verás un rectángulo verde alrededor del QR
-                4. **Automáticamente se abrirá el formulario** para completar el registro
-                5. Si no funciona, presiona **Reiniciar Escaneo**
-                """)
+        invernadero_id = invernadero[0]
+    else:
+        invernadero_id = None
+        st.warning("No hay invernaderos registrados")
+    
+    tipo_evento_select = st.selectbox(
+        "📌 Tipo de Evento:", 
+        ["entrada_invernadero", "salida_comer", "regreso_comida", "salida_invernadero"],
+        format_func=lambda x: {
+            'entrada_invernadero': '🚪 Entrada a Invernadero', 
+            'salida_comer': '🍽️ Salida a Comer',
+            'regreso_comida': '✅ Regreso de Comida', 
+            'salida_invernadero': '🚪 Salida'
+        }[x],
+        key="tipo_asistencia_final"
+    )
+    
+    st.info(f"👤 Trabajador: {nombre}")
+    
+    if st.button("✅ Registrar Evento", type="primary", use_container_width=True, key="registrar_asistencia_final"):
+        if tipo_evento_select == 'entrada_invernadero' and not invernadero_id:
+            st.error("❌ Seleccione un invernadero")
+        else:
+            success, msg = registrar_evento_asistencia(
+                int(id_trabajador), 
+                invernadero_id if tipo_evento_select == 'entrada_invernadero' else None, 
+                tipo_evento_select
+            )
+            if success:
+                st.success(msg)
+                st.balloons()
+                st.rerun()
+            else:
+                st.error(msg)
 # ==========================================
 # FUNCIONES DE DASHBOARD Y REPORTES (SUPABASE)
 # ==========================================
