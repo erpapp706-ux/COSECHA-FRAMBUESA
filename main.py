@@ -2378,9 +2378,9 @@ def mostrar_formulario_cosecha_instant(id_trabajador, nombre, mostrar_invernader
     cantidad_clams = st.number_input("🍓 Cantidad de Clams:", min_value=0.0, value=0.0, step=1.0, key="clams_instant")
     
     if presentacion == "12 oz":
-        cajas = cantidad_clams / 12 if cantidad_clams > 0 else 0
-    else:
         cajas = cantidad_clams / 6 if cantidad_clams > 0 else 0
+    else:
+        cajas = cantidad_clams / 12 if cantidad_clams > 0 else 0
     
     st.metric("📦 Cajas a registrar", f"{cajas:.2f}")
     st.info(f"👤 Trabajador: **{nombre}**")
