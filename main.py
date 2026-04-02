@@ -2441,15 +2441,25 @@ def escanear_qr_con_camara(tipo_evento="asistencia", mostrar_invernadero=False):
                     st.warning(f"⚠️ Trabajador no encontrado: {result['nombre']}")
     
     # Configurar WebRTC streamer
-    webrtc_ctx = webrtc_streamer(
-        key=f"qr-scanner-{st.session_state.webrtc_key}",
-        mode=WebRtcMode.SENDRECV,
-        video_processor_factory=QRVideoProcessor,
-        media_stream_constraints={"video": True, "audio": False},
-        async_processing=True,
-        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
-    )
-    
+  # Reemplaza la parte de webrtc_streamer por esto:
+
+webrtc_ctx = webrtc_streamer(
+    key=f"qr-scanner-{st.session_state.webrtc_key}",
+    mode=WebRtcMode.SENDRECV,
+    video_processor_factory=QRVideoProcessor,
+    media_stream_constraints={"video": True, "audio": False},
+    async_processing=True,
+    rtc_configuration={
+        "iceServers": [
+            {"urls": ["stun:stun.l.google.com:19302"]},
+            {"urls": ["stun:stun1.l.google.com:19302"]},
+            {"urls": ["stun:stun2.l.google.com:19302"]},
+            {"urls": ["stun:stun3.l.google.com:19302"]},
+            {"urls": ["stun:stun4.l.google.com:19302"]},
+            {"urls": ["stun:stun.stunprotocol.org:3478"]},
+        ]
+    },
+)
     # Procesar resultados si hay contexto activo
     if webrtc_ctx.state.playing:
         process_qr_result()
