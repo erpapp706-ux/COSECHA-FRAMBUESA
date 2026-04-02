@@ -3230,7 +3230,7 @@ def mostrar_avance_cosecha():
     <div style="background-color: #e8f5e9; padding: 15px; border-radius: 10px; margin-bottom: 20px;">
         <strong>📌 Información:</strong><br>
         • Invernaderos 1 al 8: <strong>40 líneas</strong> cada uno<br>
-        • Invernaderos 9 al 11: <strong>39 líneas</strong> cada uno<br>
+        • Invernaderos 9 al 11: <strong>36 líneas</strong> cada uno<br>
         • Cada día comienza desde 0 líneas cosechadas<br>
         • Se pueden registrar múltiples avances durante el día<br>
         • El porcentaje se calcula automáticamente sobre el total del día
