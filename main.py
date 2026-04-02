@@ -2266,9 +2266,8 @@ class QRVideoProcessor(VideoProcessorBase):
 # ==========================================
 # FUNCIÓN PRINCIPAL DE ESCANEO QR CON WEBRTC
 # ==========================================
-
 def escanear_qr_con_camara(tipo_evento="asistencia", mostrar_invernadero=False):
-    """Escanea QR usando streamlit-webrtc (más estable y eficiente)"""
+    """Escanea QR usando streamlit-webrtc"""
     
     st.markdown("### 📷 Escaneo Automático con Cámara")
     
@@ -2289,12 +2288,11 @@ def escanear_qr_con_camara(tipo_evento="asistencia", mostrar_invernadero=False):
             st.session_state.webrtc_key += 1
             st.rerun()
     
-    # Si ya se escaneó y completó, mostrar formulario
+    # Si ya se escaneó, mostrar formulario
     if st.session_state.qr_scan_completed and st.session_state.qr_scanned_data:
         datos = st.session_state.qr_scanned_data
         st.success(f"✅ QR Detectado: {datos['nombre']} (ID: {datos['id']})")
         
-        # Mostrar formulario según tipo de evento
         if tipo_evento == "cosecha":
             st.markdown("### 📋 Registrar Cosecha")
             
@@ -2304,9 +2302,8 @@ def escanear_qr_con_camara(tipo_evento="asistencia", mostrar_invernadero=False):
                 if invernaderos:
                     invernadero = st.selectbox("🏭 Invernadero:", invernaderos, 
                                                format_func=lambda x: f"{x[1]} - {x[2]}", 
-                                               key="invernadero_qr_scan_webrtc")
+                                               key="invernadero_qr_webrtc")
                     invernadero_id = invernadero[0]
-                    st.session_state.invernadero_id = invernadero_id
                 else:
                     st.warning("No hay invernaderos registrados")
             
@@ -2322,7 +2319,7 @@ def escanear_qr_con_camara(tipo_evento="asistencia", mostrar_invernadero=False):
             
             col1, col2 = st.columns(2)
             with col1:
-                tipo_cosecha = st.selectbox("Tipo de Cosecha:", ["Nacional", "Exportación"], key="tipo_cosecha_qr_webrtc")
+                tipo_cosecha = st.selectbox("Tipo de Cosecha:", ["Nacional", "Exportación"], key="tipo_qr_webrtc")
                 if tipo_cosecha == "Nacional":
                     calidad = st.selectbox("Calidad:", ["Salmon", "Sobretono"], key="calidad_qr_webrtc")
                 else:
@@ -2330,7 +2327,7 @@ def escanear_qr_con_camara(tipo_evento="asistencia", mostrar_invernadero=False):
             
             with col2:
                 if tipo_cosecha == "Exportación":
-                    presentacion = st.selectbox("Presentación:", ["6 oz", "12 oz"], key="presentacion_qr_webrtc")
+                    presentacion = st.selectbox("Presentación:", ["6 oz", "12 oz"], key="pres_qr_webrtc")
                 else:
                     presentacion = "6 oz"
                     st.info("✅ Presentación automática: 6 oz")
@@ -2342,13 +2339,13 @@ def escanear_qr_con_camara(tipo_evento="asistencia", mostrar_invernadero=False):
             else:
                 cajas_calculadas = cantidad_clams / 6 if cantidad_clams > 0 else 0
             
-            st.text_input("Número de Cajas:", value=f"{cajas_calculadas:.2f}", disabled=True, key="cajas_qr_display_webrtc")
+            st.text_input("Número de Cajas:", value=f"{cajas_calculadas:.2f}", disabled=True, key="cajas_qr_webrtc")
             
-            if st.button("💾 Guardar Cosecha", type="primary", use_container_width=True, key="guardar_cosecha_qr_webrtc"):
+            if st.button("💾 Guardar Cosecha", type="primary", use_container_width=True, key="guardar_qr_webrtc"):
                 if cantidad_clams <= 0:
                     st.error("Ingrese una cantidad válida de clams")
                 elif not invernadero_id and mostrar_invernadero:
-                    st.error("❌ Seleccione un invernadero antes de guardar")
+                    st.error("❌ Seleccione un invernadero")
                 else:
                     data = {
                         'fecha': fecha_actual.date(), 
@@ -2365,7 +2362,6 @@ def escanear_qr_con_camara(tipo_evento="asistencia", mostrar_invernadero=False):
                     if success:
                         st.success(msg)
                         st.balloons()
-                        # Resetear estado
                         st.session_state.qr_scanned_data = None
                         st.session_state.qr_scan_completed = False
                         st.rerun()
@@ -2381,7 +2377,7 @@ def escanear_qr_con_camara(tipo_evento="asistencia", mostrar_invernadero=False):
                     "🏭 Invernadero:", 
                     invernaderos, 
                     format_func=lambda x: f"{x[1]} - {x[2]}",
-                    key="invernadero_asistencia_qr_webrtc"
+                    key="invernadero_asistencia_webrtc"
                 )
                 invernadero_id = invernadero[0]
             else:
@@ -2397,14 +2393,14 @@ def escanear_qr_con_camara(tipo_evento="asistencia", mostrar_invernadero=False):
                     'regreso_comida': '✅ Regreso de Comida', 
                     'salida_invernadero': '🚪 Salida'
                 }[x],
-                key="tipo_evento_asistencia_qr_webrtc"
+                key="tipo_asistencia_webrtc"
             )
             
             st.info(f"👤 Trabajador: {datos['nombre']} (ID: {datos['id']})")
             
-            if st.button("✅ Registrar Evento", type="primary", use_container_width=True, key="registrar_evento_asistencia_qr_webrtc"):
+            if st.button("✅ Registrar Evento", type="primary", use_container_width=True, key="registrar_asistencia_webrtc"):
                 if tipo_evento_select == 'entrada_invernadero' and not invernadero_id:
-                    st.error("❌ Para entrada, debe seleccionar un invernadero")
+                    st.error("❌ Seleccione un invernadero")
                 else:
                     success, msg = registrar_evento_asistencia(
                         int(datos['id']), 
@@ -2414,7 +2410,6 @@ def escanear_qr_con_camara(tipo_evento="asistencia", mostrar_invernadero=False):
                     if success:
                         st.success(msg)
                         st.balloons()
-                        # Resetear estado
                         st.session_state.qr_scanned_data = None
                         st.session_state.qr_scan_completed = False
                         st.rerun()
@@ -2423,15 +2418,13 @@ def escanear_qr_con_camara(tipo_evento="asistencia", mostrar_invernadero=False):
         
         return
     
-    # Si no hay escaneo completado, mostrar la cámara
-    st.info("📷 Acerca un código QR a la cámara para escanear automáticamente")
+    # Mostrar cámara
+    st.info("📷 Acerca un código QR a la cámara")
     
-    # Callback para procesar resultados
     def process_qr_result():
         if hasattr(webrtc_ctx, 'video_processor') and webrtc_ctx.video_processor:
             result = webrtc_ctx.video_processor.get_result()
             if result and not st.session_state.qr_scan_completed:
-                # Verificar que el trabajador existe
                 trabajador = get_worker_by_id(int(result['id']))
                 if trabajador:
                     st.session_state.qr_scanned_data = result
@@ -2440,31 +2433,18 @@ def escanear_qr_con_camara(tipo_evento="asistencia", mostrar_invernadero=False):
                 else:
                     st.warning(f"⚠️ Trabajador no encontrado: {result['nombre']}")
     
-    # Configurar WebRTC streamer
-  # Reemplaza la parte de webrtc_streamer por esto:
-
-webrtc_ctx = webrtc_streamer(
-    key=f"qr-scanner-{st.session_state.webrtc_key}",
-    mode=WebRtcMode.SENDRECV,
-    video_processor_factory=QRVideoProcessor,
-    media_stream_constraints={"video": True, "audio": False},
-    async_processing=True,
-    rtc_configuration={
-        "iceServers": [
-            {"urls": ["stun:stun.l.google.com:19302"]},
-            {"urls": ["stun:stun1.l.google.com:19302"]},
-            {"urls": ["stun:stun2.l.google.com:19302"]},
-            {"urls": ["stun:stun3.l.google.com:19302"]},
-            {"urls": ["stun:stun4.l.google.com:19302"]},
-            {"urls": ["stun:stun.stunprotocol.org:3478"]},
-        ]
-    },
-)
-    # Procesar resultados si hay contexto activo
-    if webrtc_ctx.state.playing:
+    webrtc_ctx = webrtc_streamer(
+        key=f"qr-scanner-{st.session_state.webrtc_key}",
+        mode=WebRtcMode.SENDRECV,
+        video_processor_factory=QRVideoProcessor,
+        media_stream_constraints={"video": True, "audio": False},
+        async_processing=True,
+        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
+    )
+    
+    if webrtc_ctx and webrtc_ctx.state.playing:
         process_qr_result()
     
-    # Instrucciones
     with st.expander("📖 Instrucciones de uso"):
         st.markdown("""
         1. **Permite el acceso a la cámara** cuando el navegador lo solicite
