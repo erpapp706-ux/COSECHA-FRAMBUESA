@@ -2267,54 +2267,78 @@ class QRVideoProcessor(VideoProcessorBase):
 # FUNCIÓN PRINCIPAL DE ESCANEO QR CON WEBRTC
 # ==========================================
 def escanear_qr_con_camara(tipo_evento="asistencia", mostrar_invernadero=False):
-    """Versión que funciona en Streamlit Cloud con OpenCV"""
+    """Escanea QR instantáneamente usando la cámara del dispositivo"""
     
-    st.markdown("### 📷 Escaneo con Cámara")
+    st.markdown("### 📷 Escaneo Instantáneo con Cámara")
     
-    # Usar file_uploader para subir imagen (más confiable en la nube)
-    st.info("📸 Opción 1: Sube una foto del código QR")
-    uploaded_file = st.file_uploader("Selecciona una imagen del QR", type=["png", "jpg", "jpeg"], key="qr_upload")
+    # Inicializar estado
+    if 'qr_detected' not in st.session_state:
+        st.session_state.qr_detected = False
+    if 'scanned_worker' not in st.session_state:
+        st.session_state.scanned_worker = None
+    if 'show_form' not in st.session_state:
+        st.session_state.show_form = False
     
-    if uploaded_file:
-        from PIL import Image
-        image = Image.open(uploaded_file)
-        st.image(image, caption="Imagen subida", width=200)
+    # Botón para reiniciar
+    if st.button("🔄 Nuevo Escaneo", use_container_width=True):
+        st.session_state.qr_detected = False
+        st.session_state.scanned_worker = None
+        st.session_state.show_form = False
+        st.rerun()
+    
+    # Mostrar cámara (SOLO si no se ha detectado QR)
+    if not st.session_state.show_form:
+        camera_image = st.camera_input("📸 Enfoca el código QR", key="qr_camera")
         
-        # Decodificar QR
-        qr_codes = decode(np.array(image))
-        
-        if qr_codes:
-            for qr in qr_codes:
-                qr_data = qr.data.decode('utf-8')
-                id_trabajador, nombre = procesar_qr_data(qr_data)
-                
-                if id_trabajador and nombre:
-                    trabajador = get_worker_by_id(id_trabajador)
-                    if trabajador:
-                        st.success(f"✅ QR Detectado: {nombre}")
-                        
-                        # Mostrar formulario según tipo de evento
-                        if tipo_evento == "cosecha":
-                            return mostrar_formulario_cosecha_qr(id_trabajador, nombre, mostrar_invernadero)
-                        elif tipo_evento == "asistencia":
-                            return mostrar_formulario_asistencia_qr(id_trabajador, nombre)
+        if camera_image:
+            # Procesar la imagen instantáneamente
+            from PIL import Image
+            import numpy as np
+            from pyzbar.pyzbar import decode
+            
+            # Convertir imagen
+            image = Image.open(camera_image)
+            img_array = np.array(image)
+            
+            # Decodificar QR
+            qr_codes = decode(img_array)
+            
+            if qr_codes:
+                for qr in qr_codes:
+                    qr_data = qr.data.decode('utf-8')
+                    id_trabajador, nombre = procesar_qr_data(qr_data)
+                    
+                    if id_trabajador and nombre:
+                        trabajador = get_worker_by_id(id_trabajador)
+                        if trabajador:
+                            st.session_state.scanned_worker = {
+                                'id': id_trabajador,
+                                'nombre': nombre,
+                                'data': trabajador
+                            }
+                            st.session_state.show_form = True
+                            st.session_state.qr_detected = True
+                            st.rerun()
+                        else:
+                            st.error(f"❌ Trabajador no encontrado: {nombre}")
                     else:
-                        st.error(f"❌ Trabajador no encontrado: {nombre}")
-                else:
-                    st.error("❌ QR no válido")
-        else:
-            st.error("❌ No se detectó ningún código QR en la imagen")
+                        st.error("❌ QR no válido")
+            else:
+                st.warning("📷 No se detectó QR. Enfoca bien el código.")
     
-    st.markdown("---")
-    st.info("📱 Opción 2: Escanea con la cámara de tu celular")
-    st.markdown("""
-    1. Abre la cámara de tu celular
-    2. Escanea el código QR
-    3. Se abrirá automáticamente el formulario
-    """)
+    # Mostrar formulario si ya se escaneó
+    if st.session_state.show_form and st.session_state.scanned_worker:
+        trabajador = st.session_state.scanned_worker
+        st.success(f"✅ QR Detectado: {trabajador['nombre']}")
+        
+        if tipo_evento == "cosecha":
+            mostrar_formulario_cosecha_instant(trabajador['id'], trabajador['nombre'], mostrar_invernadero)
+        elif tipo_evento == "asistencia":
+            mostrar_formulario_asistencia_instant(trabajador['id'], trabajador['nombre'])
 
-def mostrar_formulario_cosecha_qr(id_trabajador, nombre, mostrar_invernadero):
-    """Muestra formulario de cosecha después del escaneo QR"""
+def mostrar_formulario_cosecha_instant(id_trabajador, nombre, mostrar_invernadero):
+    """Formulario que aparece instantáneamente después del escaneo"""
+    
     st.markdown("### 📋 Registrar Cosecha")
     
     invernadero_id = None
@@ -2323,10 +2347,8 @@ def mostrar_formulario_cosecha_qr(id_trabajador, nombre, mostrar_invernadero):
         if invernaderos:
             invernadero = st.selectbox("🏭 Invernadero:", invernaderos, 
                                        format_func=lambda x: f"{x[1]} - {x[2]}", 
-                                       key="invernadero_qr_final")
+                                       key="invernadero_instant")
             invernadero_id = invernadero[0]
-        else:
-            st.warning("No hay invernaderos registrados")
     
     fecha_actual = datetime.now()
     dias_espanol = {'Monday': 'Lunes', 'Tuesday': 'Martes', 'Wednesday': 'Miércoles',
@@ -2334,106 +2356,123 @@ def mostrar_formulario_cosecha_qr(id_trabajador, nombre, mostrar_invernadero):
     dia_espanol = dias_espanol[fecha_actual.strftime('%A')]
     
     col1, col2, col3 = st.columns(3)
-    with col1: st.write(f"**Fecha:** {fecha_actual.strftime('%d/%m/%Y')}")
-    with col2: st.write(f"**Día:** {dia_espanol}")
-    with col3: st.write(f"**Semana:** {fecha_actual.isocalendar()[1]}")
+    with col1: st.write(f"**📅 Fecha:** {fecha_actual.strftime('%d/%m/%Y')}")
+    with col2: st.write(f"**📆 Día:** {dia_espanol}")
+    with col3: st.write(f"**📊 Semana:** {fecha_actual.isocalendar()[1]}")
     
     col1, col2 = st.columns(2)
     with col1:
-        tipo_cosecha = st.selectbox("Tipo de Cosecha:", ["Nacional", "Exportación"], key="tipo_qr_final")
+        tipo_cosecha = st.radio("Tipo:", ["Nacional", "Exportación"], horizontal=True, key="tipo_instant")
         if tipo_cosecha == "Nacional":
-            calidad = st.selectbox("Calidad:", ["Salmon", "Sobretono"], key="calidad_qr_final")
+            calidad = st.selectbox("Calidad:", ["Salmon", "Sobretono"], key="calidad_instant")
         else:
             calidad = None
     
     with col2:
         if tipo_cosecha == "Exportación":
-            presentacion = st.selectbox("Presentación:", ["6 oz", "12 oz"], key="pres_qr_final")
+            presentacion = st.selectbox("Presentación:", ["6 oz", "12 oz"], key="pres_instant")
         else:
             presentacion = "6 oz"
-            st.info("✅ Presentación automática: 6 oz")
+            st.info("✅ Presentación: 6 oz")
     
-    cantidad_clams = st.number_input("Cantidad de Clams:", min_value=0.0, value=0.0, step=1.0, key="clams_qr_final")
+    cantidad_clams = st.number_input("🍓 Cantidad de Clams:", min_value=0.0, value=0.0, step=1.0, key="clams_instant")
     
     if presentacion == "12 oz":
-        cajas_calculadas = cantidad_clams / 12 if cantidad_clams > 0 else 0
+        cajas = cantidad_clams / 12 if cantidad_clams > 0 else 0
     else:
-        cajas_calculadas = cantidad_clams / 6 if cantidad_clams > 0 else 0
+        cajas = cantidad_clams / 6 if cantidad_clams > 0 else 0
     
-    st.text_input("Número de Cajas:", value=f"{cajas_calculadas:.2f}", disabled=True, key="cajas_qr_final")
-    st.info(f"👤 Trabajador: {nombre}")
+    st.metric("📦 Cajas a registrar", f"{cajas:.2f}")
+    st.info(f"👤 Trabajador: **{nombre}**")
     
-    if st.button("💾 Guardar Cosecha", type="primary", use_container_width=True, key="guardar_qr_final"):
-        if cantidad_clams <= 0:
-            st.error("Ingrese una cantidad válida de clams")
-        elif not invernadero_id and mostrar_invernadero:
-            st.error("❌ Seleccione un invernadero")
-        else:
-            data = {
-                'fecha': fecha_actual.date(), 
-                'dia': dia_espanol, 
-                'semana': fecha_actual.isocalendar()[1],
-                'trabajador_id': int(id_trabajador), 
-                'invernadero_id': invernadero_id,
-                'tipo_cosecha': tipo_cosecha, 
-                'calidad': calidad,
-                'presentacion': presentacion,
-                'cantidad_clams': float(cantidad_clams)
-            }
-            success, msg = guardar_cosecha(data)
-            if success:
-                st.success(msg)
-                st.balloons()
-                st.rerun()
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("💾 Guardar Cosecha", type="primary", use_container_width=True):
+            if cantidad_clams <= 0:
+                st.error("Ingrese cantidad válida")
+            elif not invernadero_id and mostrar_invernadero:
+                st.error("Seleccione invernadero")
             else:
-                st.error(msg)
+                data = {
+                    'fecha': fecha_actual.date(),
+                    'dia': dia_espanol,
+                    'semana': fecha_actual.isocalendar()[1],
+                    'trabajador_id': int(id_trabajador),
+                    'invernadero_id': invernadero_id,
+                    'tipo_cosecha': tipo_cosecha,
+                    'calidad': calidad,
+                    'presentacion': presentacion,
+                    'cantidad_clams': float(cantidad_clams)
+                }
+                success, msg = guardar_cosecha(data)
+                if success:
+                    st.success(msg)
+                    st.balloons()
+                    # Resetear para nuevo escaneo
+                    st.session_state.show_form = False
+                    st.session_state.scanned_worker = None
+                    st.rerun()
+                else:
+                    st.error(msg)
+    with col2:
+        if st.button("🔄 Escanear otro", use_container_width=True):
+            st.session_state.show_form = False
+            st.session_state.scanned_worker = None
+            st.rerun()
 
-def mostrar_formulario_asistencia_qr(id_trabajador, nombre):
-    """Muestra formulario de asistencia después del escaneo QR"""
-    st.markdown("### 📋 Registrar Evento de Asistencia")
+def mostrar_formulario_asistencia_instant(id_trabajador, nombre):
+    """Formulario de asistencia instantáneo"""
+    
+    st.markdown("### 📋 Registrar Asistencia")
     
     invernaderos = get_invernaderos()
     if invernaderos:
-        invernadero = st.selectbox(
-            "🏭 Invernadero:", 
-            invernaderos, 
-            format_func=lambda x: f"{x[1]} - {x[2]}",
-            key="invernadero_asistencia_final"
-        )
+        invernadero = st.selectbox("🏭 Invernadero:", invernaderos, 
+                                   format_func=lambda x: f"{x[1]} - {x[2]}", 
+                                   key="invernadero_asistencia_instant")
         invernadero_id = invernadero[0]
     else:
         invernadero_id = None
-        st.warning("No hay invernaderos registrados")
+        st.warning("No hay invernaderos")
     
-    tipo_evento_select = st.selectbox(
-        "📌 Tipo de Evento:", 
+    tipo_evento = st.selectbox(
+        "📌 Evento:",
         ["entrada_invernadero", "salida_comer", "regreso_comida", "salida_invernadero"],
         format_func=lambda x: {
-            'entrada_invernadero': '🚪 Entrada a Invernadero', 
+            'entrada_invernadero': '🚪 Entrada',
             'salida_comer': '🍽️ Salida a Comer',
-            'regreso_comida': '✅ Regreso de Comida', 
+            'regreso_comida': '✅ Regreso',
             'salida_invernadero': '🚪 Salida'
         }[x],
-        key="tipo_asistencia_final"
+        key="tipo_instant"
     )
     
-    st.info(f"👤 Trabajador: {nombre}")
+    st.info(f"👤 Trabajador: **{nombre}**")
     
-    if st.button("✅ Registrar Evento", type="primary", use_container_width=True, key="registrar_asistencia_final"):
-        if tipo_evento_select == 'entrada_invernadero' and not invernadero_id:
-            st.error("❌ Seleccione un invernadero")
-        else:
-            success, msg = registrar_evento_asistencia(
-                int(id_trabajador), 
-                invernadero_id if tipo_evento_select == 'entrada_invernadero' else None, 
-                tipo_evento_select
-            )
-            if success:
-                st.success(msg)
-                st.balloons()
-                st.rerun()
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("✅ Registrar", type="primary", use_container_width=True):
+            if tipo_evento == 'entrada_invernadero' and not invernadero_id:
+                st.error("Seleccione invernadero")
             else:
-                st.error(msg)
+                success, msg = registrar_evento_asistencia(
+                    int(id_trabajador),
+                    invernadero_id if tipo_evento == 'entrada_invernadero' else None,
+                    tipo_evento
+                )
+                if success:
+                    st.success(msg)
+                    st.balloons()
+                    st.session_state.show_form = False
+                    st.session_state.scanned_worker = None
+                    st.rerun()
+                else:
+                    st.error(msg)
+    with col2:
+        if st.button("🔄 Escanear otro", use_container_width=True):
+            st.session_state.show_form = False
+            st.session_state.scanned_worker = None
+            st.rerun()
 # ==========================================
 # FUNCIONES DE DASHBOARD Y REPORTES (SUPABASE)
 # ==========================================
