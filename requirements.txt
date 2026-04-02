@@ -6,3 +6,6 @@ qrcode
 Pillow
 plotly
 reportlab
+opencv-python-headless
+numpy
+pyzbar
