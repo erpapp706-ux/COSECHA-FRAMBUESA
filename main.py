@@ -23,6 +23,9 @@ import time
 import io
 import zipfile
 from supabase import create_client, Client
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode
+import av
+from queue import Queue
 from supabase.lib.client_options import ClientOptions
 import bcrypt
 from functools import wraps
@@ -2181,104 +2184,117 @@ def generar_qr_trabajador_simple(id_trabajador, nombre, url_base="http://localho
     img_bytes.seek(0)
     return img_bytes
 
-def escanear_qr_con_camara(tipo_evento="asistencia", mostrar_invernadero=False):
-    st.markdown("### 📷 Escaneo Automático con Cámara")
+# ==========================================
+# CLASE PROCESADOR DE VIDEO PARA QR (WEBRTC)
+# ==========================================
+
+class QRVideoProcessor(VideoProcessorBase):
+    """Procesador de video para detección de códigos QR usando WebRTC"""
     
-    if 'qr_scan_active' not in st.session_state:
-        st.session_state.qr_scan_active = True
-        st.session_state.qr_scanned = False
-        st.session_state.scanned_data = None
-        st.session_state.invernadero_id = None
-    
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        if st.button("🔄 Reiniciar Escaneo", use_container_width=True, key="btn_reiniciar_scan"):
-            st.session_state.qr_scan_active = True
-            st.session_state.qr_scanned = False
-            st.session_state.scanned_data = None
-            st.session_state.invernadero_id = None
-            st.rerun()
-    
-    if st.session_state.qr_scan_active and not st.session_state.qr_scanned:
+    def __init__(self):
+        self.qr_data = None
+        self.qr_detected = False
+        self.last_qr = None
+        self.last_qr_time = 0
+        self._frame_count = 0
+        self.result_queue = Queue()
+        
+    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
+        """Procesa cada frame del video"""
+        self._frame_count += 1
+        
+        # Procesar cada 3 frames para mejor rendimiento
+        if self._frame_count % 3 != 0:
+            return frame
+        
+        img = frame.to_ndarray(format="bgr24")
+        
         try:
-            cap = cv2.VideoCapture(0)
-            if not cap.isOpened():
-                st.error("❌ No se pudo acceder a la cámara")
-                return
+            # Decodificar QR
+            qr_codes = decode(img)
             
-            st.success("✅ Cámara activada. Acerca un código QR a la cámara.")
-            video_placeholder = st.empty()
-            status_placeholder = st.empty()
-            status_placeholder.info("🔍 Buscando código QR...")
-            
-            start_time = time.time()
-            timeout = 60
-            last_qr = None
-            
-            while time.time() - start_time < timeout and not st.session_state.qr_scanned:
-                ret, frame = cap.read()
-                if not ret:
-                    break
-                
-                qr_codes = decode(frame)
-                
-                if qr_codes:
-                    for qr in qr_codes:
-                        qr_data = qr.data.decode('utf-8')
-                        if qr_data != last_qr:
-                            last_qr = qr_data
-                            id_trabajador, nombre = procesar_qr_data(qr_data)
-                            
-                            if id_trabajador and nombre:
-                                trabajador = get_worker_by_id(id_trabajador)
-                                if trabajador:
-                                    st.session_state.scanned_data = {'id': id_trabajador, 'nombre': nombre}
-                                    st.session_state.qr_scan_active = False
-                                    st.session_state.qr_scanned = True
-                                    cap.release()
-                                    cv2.destroyAllWindows()
-                                    st.rerun()
-                                else:
-                                    status_placeholder.warning(f"⚠️ Trabajador no encontrado: {nombre}")
-                                    time.sleep(2)
-                            else:
-                                status_placeholder.warning("⚠️ QR no válido")
-                                time.sleep(1)
+            if qr_codes:
+                for qr in qr_codes:
+                    qr_data = qr.data.decode('utf-8')
                     
-                    for qr in qr_codes:
+                    # Evitar duplicados muy seguidos
+                    current_time = time.time()
+                    if qr_data != self.last_qr or (current_time - self.last_qr_time) > 2:
+                        self.last_qr = qr_data
+                        self.last_qr_time = current_time
+                        
+                        # Procesar datos del QR
+                        id_trabajador, nombre = procesar_qr_data(qr_data)
+                        
+                        if id_trabajador and nombre:
+                            self.qr_data = {'id': id_trabajador, 'nombre': nombre}
+                            self.qr_detected = True
+                            self.result_queue.put(self.qr_data)
+                            
+                            # Dibujar rectángulo verde alrededor del QR
+                            points = qr.polygon
+                            if points:
+                                pts = np.array(points, np.int32)
+                                pts = pts.reshape((-1, 1, 2))
+                                cv2.polylines(img, [pts], True, (0, 255, 0), 3)
+                                cv2.putText(img, "QR Detectado!", (pts[0][0][0], pts[0][0][1] - 10),
+                                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    else:
+                        # Dibujar rectángulo sin texto repetitivo
                         points = qr.polygon
                         if points:
                             pts = np.array(points, np.int32)
                             pts = pts.reshape((-1, 1, 2))
-                            cv2.polylines(frame, [pts], True, (0, 255, 0), 3)
-                    cv2.putText(frame, "QR Detectado!", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-                else:
-                    remaining = int(timeout - (time.time() - start_time))
-                    cv2.putText(frame, f"Buscando QR... ({remaining}s)", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                            cv2.polylines(img, [pts], True, (0, 255, 0), 2)
+            else:
+                # Mostrar mensaje de búsqueda
+                cv2.putText(img, "Buscando QR...", (10, 30),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                 
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                video_placeholder.image(frame_rgb, channels="RGB", use_container_width=True)
-                time.sleep(0.03)
-            
-            cap.release()
-            cv2.destroyAllWindows()
-            if not st.session_state.qr_scanned:
-                status_placeholder.warning("⏰ Tiempo agotado. No se detectó QR.")
-                if st.button("🔄 Reintentar", use_container_width=True, key="btn_reintentar_scan"):
-                    st.session_state.qr_scan_active = True
-                    st.rerun()
-                    
         except Exception as e:
-            st.error(f"Error con la cámara: {str(e)}")
-            if 'cap' in locals():
-                cap.release()
-            cv2.destroyAllWindows()
-            st.session_state.qr_scan_active = False
+            # Error silencioso para no interrumpir el video
+            pass
+        
+        return av.VideoFrame.from_ndarray(img, format="bgr24")
     
-    elif st.session_state.scanned_data:
-        datos = st.session_state.scanned_data
+    def get_result(self):
+        """Obtiene el resultado del escaneo"""
+        if not self.result_queue.empty():
+            return self.result_queue.get()
+        return None
+
+# ==========================================
+# FUNCIÓN PRINCIPAL DE ESCANEO QR CON WEBRTC
+# ==========================================
+
+def escanear_qr_con_camara(tipo_evento="asistencia", mostrar_invernadero=False):
+    """Escanea QR usando streamlit-webrtc (más estable y eficiente)"""
+    
+    st.markdown("### 📷 Escaneo Automático con Cámara")
+    
+    # Inicializar estado de sesión
+    if 'qr_scanned_data' not in st.session_state:
+        st.session_state.qr_scanned_data = None
+    if 'qr_scan_completed' not in st.session_state:
+        st.session_state.qr_scan_completed = False
+    if 'webrtc_key' not in st.session_state:
+        st.session_state.webrtc_key = 0
+    
+    # Botón para reiniciar
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        if st.button("🔄 Reiniciar Escaneo", use_container_width=True, key="btn_reiniciar_scan_webrtc"):
+            st.session_state.qr_scanned_data = None
+            st.session_state.qr_scan_completed = False
+            st.session_state.webrtc_key += 1
+            st.rerun()
+    
+    # Si ya se escaneó y completó, mostrar formulario
+    if st.session_state.qr_scan_completed and st.session_state.qr_scanned_data:
+        datos = st.session_state.qr_scanned_data
         st.success(f"✅ QR Detectado: {datos['nombre']} (ID: {datos['id']})")
         
+        # Mostrar formulario según tipo de evento
         if tipo_evento == "cosecha":
             st.markdown("### 📋 Registrar Cosecha")
             
@@ -2286,7 +2302,9 @@ def escanear_qr_con_camara(tipo_evento="asistencia", mostrar_invernadero=False):
             if mostrar_invernadero:
                 invernaderos = get_invernaderos()
                 if invernaderos:
-                    invernadero = st.selectbox("🏭 Invernadero:", invernaderos, format_func=lambda x: f"{x[1]} - {x[2]}", key="invernadero_qr_scan")
+                    invernadero = st.selectbox("🏭 Invernadero:", invernaderos, 
+                                               format_func=lambda x: f"{x[1]} - {x[2]}", 
+                                               key="invernadero_qr_scan_webrtc")
                     invernadero_id = invernadero[0]
                     st.session_state.invernadero_id = invernadero_id
                 else:
@@ -2304,32 +2322,32 @@ def escanear_qr_con_camara(tipo_evento="asistencia", mostrar_invernadero=False):
             
             col1, col2 = st.columns(2)
             with col1:
-                tipo_cosecha = st.selectbox("Tipo de Cosecha:", ["Nacional", "Exportación"], key="tipo_cosecha_qr")
+                tipo_cosecha = st.selectbox("Tipo de Cosecha:", ["Nacional", "Exportación"], key="tipo_cosecha_qr_webrtc")
                 if tipo_cosecha == "Nacional":
-                    calidad = st.selectbox("Calidad:", ["Salmon", "Sobretono"], key="calidad_qr")
+                    calidad = st.selectbox("Calidad:", ["Salmon", "Sobretono"], key="calidad_qr_webrtc")
                 else:
                     calidad = None
             
             with col2:
                 if tipo_cosecha == "Exportación":
-                    presentacion = st.selectbox("Presentación:", ["6 oz", "12 oz"], key="presentacion_qr")
+                    presentacion = st.selectbox("Presentación:", ["6 oz", "12 oz"], key="presentacion_qr_webrtc")
                 else:
                     presentacion = "6 oz"
                     st.info("✅ Presentación automática: 6 oz")
             
-            cantidad_clams = st.number_input("Cantidad de Clams:", min_value=0.0, value=0.0, step=1.0, key="clams_qr")
+            cantidad_clams = st.number_input("Cantidad de Clams:", min_value=0.0, value=0.0, step=1.0, key="clams_qr_webrtc")
             
             if presentacion == "12 oz":
                 cajas_calculadas = cantidad_clams / 12 if cantidad_clams > 0 else 0
             else:
                 cajas_calculadas = cantidad_clams / 6 if cantidad_clams > 0 else 0
             
-            st.text_input("Número de Cajas:", value=f"{cajas_calculadas:.2f}", disabled=True, key="cajas_qr_display")
+            st.text_input("Número de Cajas:", value=f"{cajas_calculadas:.2f}", disabled=True, key="cajas_qr_display_webrtc")
             
-            if st.button("💾 Guardar Cosecha", type="primary", use_container_width=True, key="guardar_cosecha_qr"):
+            if st.button("💾 Guardar Cosecha", type="primary", use_container_width=True, key="guardar_cosecha_qr_webrtc"):
                 if cantidad_clams <= 0:
                     st.error("Ingrese una cantidad válida de clams")
-                elif not invernadero_id:
+                elif not invernadero_id and mostrar_invernadero:
                     st.error("❌ Seleccione un invernadero antes de guardar")
                 else:
                     data = {
@@ -2347,8 +2365,9 @@ def escanear_qr_con_camara(tipo_evento="asistencia", mostrar_invernadero=False):
                     if success:
                         st.success(msg)
                         st.balloons()
-                        st.session_state.scanned_data = None
-                        st.session_state.qr_scan_active = True
+                        # Resetear estado
+                        st.session_state.qr_scanned_data = None
+                        st.session_state.qr_scan_completed = False
                         st.rerun()
                     else:
                         st.error(msg)
@@ -2362,7 +2381,7 @@ def escanear_qr_con_camara(tipo_evento="asistencia", mostrar_invernadero=False):
                     "🏭 Invernadero:", 
                     invernaderos, 
                     format_func=lambda x: f"{x[1]} - {x[2]}",
-                    key="invernadero_asistencia_qr"
+                    key="invernadero_asistencia_qr_webrtc"
                 )
                 invernadero_id = invernadero[0]
             else:
@@ -2378,12 +2397,12 @@ def escanear_qr_con_camara(tipo_evento="asistencia", mostrar_invernadero=False):
                     'regreso_comida': '✅ Regreso de Comida', 
                     'salida_invernadero': '🚪 Salida'
                 }[x],
-                key="tipo_evento_asistencia_qr"
+                key="tipo_evento_asistencia_qr_webrtc"
             )
             
             st.info(f"👤 Trabajador: {datos['nombre']} (ID: {datos['id']})")
             
-            if st.button("✅ Registrar Evento", type="primary", use_container_width=True, key="registrar_evento_asistencia_qr"):
+            if st.button("✅ Registrar Evento", type="primary", use_container_width=True, key="registrar_evento_asistencia_qr_webrtc"):
                 if tipo_evento_select == 'entrada_invernadero' and not invernadero_id:
                     st.error("❌ Para entrada, debe seleccionar un invernadero")
                 else:
@@ -2395,12 +2414,55 @@ def escanear_qr_con_camara(tipo_evento="asistencia", mostrar_invernadero=False):
                     if success:
                         st.success(msg)
                         st.balloons()
-                        st.session_state.scanned_data = None
-                        st.session_state.qr_scan_active = True
+                        # Resetear estado
+                        st.session_state.qr_scanned_data = None
+                        st.session_state.qr_scan_completed = False
                         st.rerun()
                     else:
                         st.error(msg)
-
+        
+        return
+    
+    # Si no hay escaneo completado, mostrar la cámara
+    st.info("📷 Acerca un código QR a la cámara para escanear automáticamente")
+    
+    # Callback para procesar resultados
+    def process_qr_result():
+        if hasattr(webrtc_ctx, 'video_processor') and webrtc_ctx.video_processor:
+            result = webrtc_ctx.video_processor.get_result()
+            if result and not st.session_state.qr_scan_completed:
+                # Verificar que el trabajador existe
+                trabajador = get_worker_by_id(int(result['id']))
+                if trabajador:
+                    st.session_state.qr_scanned_data = result
+                    st.session_state.qr_scan_completed = True
+                    st.rerun()
+                else:
+                    st.warning(f"⚠️ Trabajador no encontrado: {result['nombre']}")
+    
+    # Configurar WebRTC streamer
+    webrtc_ctx = webrtc_streamer(
+        key=f"qr-scanner-{st.session_state.webrtc_key}",
+        mode=WebRtcMode.SENDRECV,
+        video_processor_factory=QRVideoProcessor,
+        media_stream_constraints={"video": True, "audio": False},
+        async_processing=True,
+        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
+    )
+    
+    # Procesar resultados si hay contexto activo
+    if webrtc_ctx.state.playing:
+        process_qr_result()
+    
+    # Instrucciones
+    with st.expander("📖 Instrucciones de uso"):
+        st.markdown("""
+        1. **Permite el acceso a la cámara** cuando el navegador lo solicite
+        2. **Coloca el código QR frente a la cámara** a una distancia adecuada
+        3. **Espera a que se detecte** - verás un rectángulo verde alrededor del QR
+        4. **Automáticamente se abrirá el formulario** para completar el registro
+        5. Si no funciona, presiona **Reiniciar Escaneo**
+        """)
 # ==========================================
 # FUNCIONES DE DASHBOARD Y REPORTES (SUPABASE)
 # ==========================================
