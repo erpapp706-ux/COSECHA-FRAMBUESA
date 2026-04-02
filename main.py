@@ -2433,17 +2433,26 @@ def escanear_qr_con_camara(tipo_evento="asistencia", mostrar_invernadero=False):
                 else:
                     st.warning(f"⚠️ Trabajador no encontrado: {result['nombre']}")
     
-    webrtc_ctx = webrtc_streamer(
-        key=f"qr-scanner-{st.session_state.webrtc_key}",
-        mode=WebRtcMode.SENDRECV,
-        video_processor_factory=QRVideoProcessor,
-        media_stream_constraints={"video": True, "audio": False},
-        async_processing=True,
-        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
-    )
-    
-    if webrtc_ctx and webrtc_ctx.state.playing:
-        process_qr_result()
+ webrtc_ctx = webrtc_streamer(
+    key=f"qr-scanner-{st.session_state.webrtc_key}",
+    mode=WebRtcMode.SENDRECV,
+    video_processor_factory=QRVideoProcessor,
+    media_stream_constraints={"video": True, "audio": False},
+    async_processing=True,
+    rtc_configuration={
+        "iceServers": [
+            {"urls": ["stun:stun.l.google.com:19302"]},
+            {"urls": ["stun:stun1.l.google.com:19302"]},
+            {"urls": ["stun:stun2.l.google.com:19302"]},
+            # Si tienes un TURN server (recomendado para producción)
+            # {
+            #     "urls": ["turn:tu-turn-server.com:3478"],
+            #     "username": "usuario",
+            #     "credential": "contraseña"
+            # }
+        ]
+    },
+)
     
     with st.expander("📖 Instrucciones de uso"):
         st.markdown("""
