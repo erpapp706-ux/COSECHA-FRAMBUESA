@@ -6,8 +6,10 @@ qrcode
 Pillow
 plotly
 reportlab
-numpy
-openpyxl
-pytz
 opencv-python-headless
+numpy
 pyzbar
+openpyxl
+streamlit-webrtc
+pytz
+av
