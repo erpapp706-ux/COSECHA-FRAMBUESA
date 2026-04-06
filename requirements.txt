@@ -11,3 +11,4 @@ numpy
 pyzbar
 openpyxl
 streamlit-webrtc
+pytz
