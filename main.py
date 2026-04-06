@@ -4991,7 +4991,7 @@ def main():
     elif st.session_state.menu == "📊 Avance Cosecha":
         mostrar_avance_cosecha()
     
-    elif st.session_state.menu == "❄️ Envíos a Enfriado":
+    elif st.session_state.menu == "❄️ Traslado a Cámara Fría":
         mostrar_envios_enfriado()
     
     elif st.session_state.menu == "🗑️ Gestión Merma":
