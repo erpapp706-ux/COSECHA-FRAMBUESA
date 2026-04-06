@@ -22,11 +22,11 @@ import zipfile
 from supabase import create_client, Client
 import bcrypt
 from functools import wraps
+import pytz
 
 # ==========================================
 # CONFIGURACIÓN DE ZONA HORARIA MÉXICO
 # ==========================================
-import pytz
 MEXICO_TZ = pytz.timezone('America/Mexico_City')
 
 def get_mexico_time():
@@ -180,6 +180,17 @@ st.markdown("""
         background: white;
         border-radius: 15px;
         box-shadow: 0 4px 20px rgba(0,0,0,0.1);
+    }
+    .progress-card {
+        background: linear-gradient(135deg, #1e3c2c 0%, #2a6b3c 100%);
+        border-radius: 15px;
+        padding: 20px;
+        color: white;
+        text-align: center;
+    }
+    .progress-value {
+        font-size: 48px;
+        font-weight: bold;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -530,6 +541,39 @@ def get_all_workers():
         st.error(f"Error al obtener trabajadores: {str(e)}")
         return pd.DataFrame()
 
+def get_all_workers_incluyendo_inactivos():
+    try:
+        result = supabase.table('trabajadores').select("""
+            id, nombre, apellido_paterno, apellido_materno,
+            correo, telefono, estatus, fecha_alta, fecha_baja,
+            tipo_nomina,
+            departamentos:departamento_id (nombre),
+            subdepartamentos:subdepartamento_id (nombre),
+            puestos:puesto_id (nombre)
+        """).order('apellido_paterno').execute()
+        
+        data = []
+        for row in result.data:
+            data.append({
+                'id': row['id'],
+                'nombre': row['nombre'],
+                'apellido_paterno': row['apellido_paterno'],
+                'apellido_materno': row['apellido_materno'] or '',
+                'correo': row['correo'] or '',
+                'telefono': row['telefono'] or '',
+                'estatus': row['estatus'],
+                'fecha_alta': row['fecha_alta'],
+                'fecha_baja': row['fecha_baja'],
+                'departamento': row['departamentos']['nombre'] if row['departamentos'] else 'Sin asignar',
+                'subdepartamento': row['subdepartamentos']['nombre'] if row['subdepartamentos'] else 'Sin asignar',
+                'puesto': row['puestos']['nombre'] if row['puestos'] else 'Sin asignar',
+                'tipo_nomina': row['tipo_nomina']
+            })
+        return pd.DataFrame(data)
+    except Exception as e:
+        st.error(f"Error al obtener trabajadores: {str(e)}")
+        return pd.DataFrame()
+
 def get_worker_by_id(worker_id):
     try:
         result = supabase.table('trabajadores').select("""
@@ -624,6 +668,14 @@ def dar_baja(worker_id, fecha_baja):
     except Exception as e:
         return False, f"❌ Error al dar de baja: {str(e)}"
 
+def eliminar_trabajador_permanentemente(worker_id):
+    try:
+        supabase.table('trabajadores').delete().eq('id', worker_id).execute()
+        invalidar_cache()
+        return True, f"✅ Trabajador eliminado permanentemente"
+    except Exception as e:
+        return False, f"❌ Error al eliminar: {str(e)}"
+
 def reactivar_trabajador(worker_id):
     try:
         supabase.table('trabajadores').update({
@@ -692,13 +744,32 @@ def get_pesadores():
         for row in result.data:
             puesto_nombre = row['puestos']['nombre'] if row['puestos'] else ''
             if 'pesador' in puesto_nombre.lower() or 'Pesador' in puesto_nombre:
-                pesadores.append((row['id'], f"{row['nombre']} {row['apellido_paterno']}"))
+                pesadores.append((row['id'], f"{row['nombre']} {row['apellido_paterno']} ({puesto_nombre})"))
         
         if not pesadores:
             for row in result.data:
                 pesadores.append((row['id'], f"{row['nombre']} {row['apellido_paterno']}"))
         
         return pesadores
+    except:
+        return []
+
+def get_supervisores():
+    try:
+        result = supabase.table('trabajadores').select('id, nombre, apellido_paterno, puestos:puesto_id (nombre)')\
+            .eq('estatus', 'activo').execute()
+        
+        supervisores = []
+        for row in result.data:
+            puesto_nombre = row['puestos']['nombre'] if row['puestos'] else ''
+            if 'supervisor' in puesto_nombre.lower() or 'Supervisor' in puesto_nombre:
+                supervisores.append((row['id'], f"{row['nombre']} {row['apellido_paterno']} ({puesto_nombre})"))
+        
+        if not supervisores:
+            for row in result.data:
+                supervisores.append((row['id'], f"{row['nombre']} {row['apellido_paterno']}"))
+        
+        return supervisores
     except:
         return []
 
@@ -712,6 +783,11 @@ def guardar_cosecha(data):
             numero_cajas = data['cantidad_clams'] / 6
         else:
             numero_cajas = data['cantidad_clams'] / 12
+        
+        # Calcular porcentaje de merma
+        porcentaje_merma = 0
+        if data.get('merma_kilos', 0) > 0 and data['cantidad_clams'] > 0:
+            porcentaje_merma = (data['merma_kilos'] / data['cantidad_clams']) * 100
         
         supabase.table('cosechas').insert({
             'fecha': data['fecha'].isoformat(),
@@ -730,6 +806,9 @@ def guardar_cosecha(data):
         }).execute()
         
         invalidar_cache()
+        
+        if porcentaje_merma > 0:
+            return True, f"✅ Cosecha registrada - {numero_cajas:.2f} cajas | Merma: {data.get('merma_kilos', 0):.1f} kg ({porcentaje_merma:.1f}%)"
         return True, f"✅ Cosecha registrada correctamente - {numero_cajas:.2f} cajas"
     except Exception as e:
         return False, f"❌ Error al guardar: {str(e)}"
@@ -755,6 +834,11 @@ def get_cosechas(fecha_inicio=None, fecha_fin=None, invernadero_id=None):
             if row['trabajadores']:
                 trabajador_nombre = f"{row['trabajadores'].get('nombre', '')} {row['trabajadores'].get('apellido_paterno', '')}"
             
+            # Calcular porcentaje de merma
+            porcentaje_merma = 0
+            if row.get('merma_kilos', 0) > 0 and row['cantidad_clams'] > 0:
+                porcentaje_merma = (row['merma_kilos'] / row['cantidad_clams']) * 100
+            
             data.append({
                 'id': row['id'],
                 'fecha': row['fecha'],
@@ -767,6 +851,7 @@ def get_cosechas(fecha_inicio=None, fecha_fin=None, invernadero_id=None):
                 'cantidad_clams': row['cantidad_clams'],
                 'numero_cajas': row['numero_cajas'],
                 'merma_kilos': row.get('merma_kilos', 0),
+                'porcentaje_merma': f"{porcentaje_merma:.1f}%",
                 'observaciones': row.get('observaciones', '')
             })
         return pd.DataFrame(data)
@@ -2083,7 +2168,7 @@ def update_system_config(clave, valor):
 def mostrar_gestion_personal():
     st.header("👥 Gestión de Personal")
     
-    tab1, tab2 = st.tabs(["➕ Alta", "🔍 Buscar/Editar"])
+    tab1, tab2 = st.tabs(["➕ Alta", "🔍 Buscar/Editar/Eliminar"])
     
     with tab1:
         with st.form("form_alta"):
@@ -2162,12 +2247,39 @@ def mostrar_gestion_personal():
                                         if success:
                                             st.success(msg)
                                             st.rerun()
+                                        else:
+                                            st.error(msg)
                             else:
                                 if st.button("🔄 Reactivar", key=f"reactivar_{row['id']}"):
                                     success, msg = reactivar_trabajador(row['id'])
                                     if success:
                                         st.success(msg)
                                         st.rerun()
+                            
+                            if st.button("🗑️ Eliminar Permanentemente", key=f"eliminar_{row['id']}"):
+                                st.session_state['eliminar_id'] = row['id']
+                                st.session_state['eliminar_nombre'] = row['nombre']
+                        
+                        if 'eliminar_id' in st.session_state and st.session_state['eliminar_id'] == row['id']:
+                            st.warning(f"⚠️ ¿Eliminar permanentemente a {st.session_state['eliminar_nombre']}? Esta acción no se puede deshacer.")
+                            col_yes, col_no = st.columns(2)
+                            with col_yes:
+                                if st.button("✅ Sí, Eliminar", key=f"conf_eliminar_{row['id']}"):
+                                    success, msg = eliminar_trabajador_permanentemente(row['id'])
+                                    if success:
+                                        st.success(msg)
+                                        del st.session_state['eliminar_id']
+                                        del st.session_state['eliminar_nombre']
+                                        st.rerun()
+                                    else:
+                                        st.error(msg)
+                            with col_no:
+                                if st.button("❌ Cancelar", key=f"cancel_eliminar_{row['id']}"):
+                                    del st.session_state['eliminar_id']
+                                    del st.session_state['eliminar_nombre']
+                                    st.rerun()
+            else:
+                st.info("No se encontraron resultados")
 
 def mostrar_registro_cosecha():
     st.header("🌾 Registro de Cosecha")
@@ -2210,6 +2322,12 @@ def mostrar_registro_cosecha():
                         with col2:
                             cantidad_clams = st.number_input("Cantidad de Clams", min_value=0.0, step=1.0)
                             merma_kilos = st.number_input("Merma (kilos)", min_value=0.0, step=0.5)
+                            
+                            # Mostrar porcentaje de merma
+                            if cantidad_clams > 0 and merma_kilos > 0:
+                                porcentaje_merma_calc = (merma_kilos / cantidad_clams) * 100
+                                st.caption(f"📊 Porcentaje de merma: {porcentaje_merma_calc:.1f}%")
+                            
                             observaciones = st.text_area("Observaciones")
                             
                             if presentacion == "12 oz":
@@ -2276,6 +2394,12 @@ def mostrar_registro_cosecha():
                     with col2:
                         cantidad_clams = st.number_input("Cantidad de Clams", min_value=0.0, step=1.0)
                         merma_kilos = st.number_input("Merma (kilos)", min_value=0.0, step=0.5)
+                        
+                        # Mostrar porcentaje de merma
+                        if cantidad_clams > 0 and merma_kilos > 0:
+                            porcentaje_merma_calc = (merma_kilos / cantidad_clams) * 100
+                            st.caption(f"📊 Porcentaje de merma: {porcentaje_merma_calc:.1f}%")
+                        
                         observaciones = st.text_area("Observaciones")
                         
                         if presentacion == "12 oz":
@@ -2488,14 +2612,13 @@ def mostrar_traslado_camara_fria():
         col1, col2 = st.columns(2)
         
         with col1:
-            trabajadores = get_all_workers()
-            supervisores = trabajadores[trabajadores['puesto'].str.contains('Supervisor', case=False, na=False)] if not trabajadores.empty else pd.DataFrame()
-            
-            if not supervisores.empty:
-                supervisor = st.selectbox("Supervisor que entrega", supervisores.apply(lambda x: f"{x['id']} - {x['nombre']} {x['apellido_paterno']}", axis=1))
-                supervisor_id = int(supervisor.split(' - ')[0]) if supervisor else None
+            # SELECCIONAR SUPERVISOR DESDE LISTA DESPLEGABLE
+            supervisores = get_supervisores()
+            if supervisores:
+                supervisor = st.selectbox("Supervisor que entrega", supervisores, format_func=lambda x: x[1])
+                supervisor_id = supervisor[0] if supervisor else None
             else:
-                st.warning("No hay supervisores registrados")
+                st.warning("No hay supervisores registrados. Agrega supervisores en Gestión Personal.")
                 supervisor_id = None
         
         with col2:
@@ -2549,7 +2672,7 @@ def mostrar_traslado_camara_fria():
         
         trabajadores = get_all_workers()
         if not trabajadores.empty:
-            trabajador = st.selectbox("Responsable", trabajadores.apply(lambda x: f"{x['id']} - {x['nombre']} {x['apellido_paterno']}", axis=1))
+            trabajador = st.selectbox("Responsable", trabajadores.apply(lambda x: f"{x['id']} - {x['nombre']} {x['apellido_paterno']} ({x['puesto']})", axis=1))
             trabajador_id = int(trabajador.split(' - ')[0]) if trabajador else None
         else:
             trabajador_id = None
@@ -2663,7 +2786,7 @@ def mostrar_cajas_mesa():
         
         trabajadores = get_all_workers()
         if not trabajadores.empty:
-            trabajador = st.selectbox("Pesador", trabajadores.apply(lambda x: f"{x['id']} - {x['nombre']} {x['apellido_paterno']}", axis=1))
+            trabajador = st.selectbox("Pesador", trabajadores.apply(lambda x: f"{x['id']} - {x['nombre']} {x['apellido_paterno']} ({x['puesto']})", axis=1))
             trabajador_id = int(trabajador.split(' - ')[0]) if trabajador else None
         else:
             trabajador_id = None
@@ -2745,7 +2868,12 @@ def mostrar_gestion_merma():
                 invernadero_id = None
         
         with col2:
-            supervisor = st.text_input("Nombre del Supervisor")
+            supervisores = get_supervisores()
+            if supervisores:
+                supervisor = st.selectbox("Supervisor", supervisores, format_func=lambda x: x[1])
+                supervisor_nombre = supervisor[1] if supervisor else ""
+            else:
+                supervisor_nombre = st.text_input("Nombre del Supervisor")
         
         kilos_merma = st.number_input("Kilos de Merma", min_value=0.0, step=0.5)
         tipo_merma = st.selectbox("Tipo de Merma", ["Fruta dañada", "Fruta sobremadura", "Fruta con defectos", "Contaminación", "Manejo inadecuado", "Temperatura", "Plagas", "Otra"])
@@ -2753,8 +2881,8 @@ def mostrar_gestion_merma():
         registrado_por = st.text_input("Registrado por", value=st.session_state.get('user_nombre', ''))
         
         if st.button("✅ Registrar Merma", type="primary"):
-            if invernadero_id and supervisor and kilos_merma > 0 and registrado_por:
-                success, msg = registrar_merma(invernadero_id, supervisor, kilos_merma, tipo_merma, observaciones, registrado_por)
+            if invernadero_id and supervisor_nombre and kilos_merma > 0 and registrado_por:
+                success, msg = registrar_merma(invernadero_id, supervisor_nombre, kilos_merma, tipo_merma, observaciones, registrado_por)
                 if success:
                     st.success(msg)
                     st.balloons()
@@ -2840,13 +2968,19 @@ def mostrar_avance_cosecha():
             with col2:
                 turno = st.selectbox("Reporte", REPORTES_TURNOS)
             
-            supervisor = st.text_input("Supervisor")
+            supervisores = get_supervisores()
+            if supervisores:
+                supervisor = st.selectbox("Supervisor", supervisores, format_func=lambda x: x[1])
+                supervisor_nombre = supervisor[1] if supervisor else ""
+            else:
+                supervisor_nombre = st.text_input("Supervisor")
+            
             observaciones = st.text_area("Observaciones")
             
             if st.button("✅ Registrar Avance", type="primary"):
-                if supervisor:
+                if supervisor_nombre:
                     if lineas_cosechadas >= (ultimo_avance['lineas_cosechadas'] if ultimo_avance else 0):
-                        success, msg = registrar_avance_cosecha(invernadero_id, invernadero_nombre, lineas_cosechadas, supervisor, observaciones, turno)
+                        success, msg = registrar_avance_cosecha(invernadero_id, invernadero_nombre, lineas_cosechadas, supervisor_nombre, observaciones, turno)
                         if success:
                             st.success(msg)
                             st.balloons()
@@ -3090,6 +3224,7 @@ def mostrar_dashboard():
         resumen_proyecciones = {'total_proyectado': 0, 'total_real': 0, 'diferencia': 0, 'porcentaje_desviacion': 0}
         total_faltas = total_permisos = total_incidencias = 0
     
+    # KPIs
     st.markdown('<div class="section-title">📊 KPIs Estratégicos</div>', unsafe_allow_html=True)
     
     col1, col2, col3, col4, col5, col6 = st.columns(6)
@@ -3182,6 +3317,7 @@ def mostrar_dashboard():
         </div>
         """, unsafe_allow_html=True)
     
+    # AVANCE DE COSECHA DEL DÍA - CON PORCENTAJE
     st.markdown('<div class="section-title">🌾 Avance de Cosecha del Día</div>', unsafe_allow_html=True)
     
     df_avance = get_avance_hoy_por_invernadero()
@@ -3194,12 +3330,41 @@ def mostrar_dashboard():
         st.dataframe(df_avance_filtrado, use_container_width=True)
         
         if not df_avance_filtrado.empty:
+            # Tarjeta de progreso general
+            promedio_avance = df_avance_filtrado['porcentaje'].mean()
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown(f"""
+                <div class="progress-card">
+                    <div>📊 Promedio General de Avance</div>
+                    <div class="progress-value">{promedio_avance:.1f}%</div>
+                    <div>de avance en todos los invernaderos</div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            with col2:
+                total_lineas_cosechadas = df_avance_filtrado['lineas_cosechadas'].sum()
+                total_lineas_totales = df_avance_filtrado['lineas_totales'].sum()
+                porcentaje_total = (total_lineas_cosechadas / total_lineas_totales) * 100 if total_lineas_totales > 0 else 0
+                st.markdown(f"""
+                <div style="background-color: #f8f9fa; padding: 15px; border-radius: 10px; text-align: center;">
+                    <div>📈 Progreso Total del Día</div>
+                    <div style="font-size: 24px; font-weight: bold;">{total_lineas_cosechadas:,.0f} / {total_lineas_totales:,.0f} líneas</div>
+                    <div style="font-size: 18px; font-weight: bold; color: #2a6b3c;">{porcentaje_total:.1f}%</div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            # Gráfico de barras del avance
             fig = px.bar(df_avance_filtrado, x='invernadero_nombre', y='porcentaje',
                         title='Porcentaje de Avance por Invernadero (Hoy)',
-                        text='porcentaje')
+                        text='porcentaje',
+                        color='porcentaje',
+                        color_continuous_scale='Greens')
             fig.update_traces(texttemplate='%{text:.1f}%', textposition='outside')
+            fig.update_layout(plot_bgcolor='white', height=400)
             st.plotly_chart(fig, use_container_width=True)
     
+    # PRODUCCIÓN AGRÍCOLA
     st.markdown('<div class="section-title">🌾 Producción Agrícola</div>', unsafe_allow_html=True)
     
     col1, col2 = st.columns(2)
@@ -3207,16 +3372,21 @@ def mostrar_dashboard():
     with col1:
         if not df_cosechas.empty:
             df_semanal = df_cosechas.groupby('semana')['numero_cajas'].sum().reset_index().sort_values('semana')
-            fig = px.line(df_semanal, x='semana', y='numero_cajas', title='Cajas Cosechadas por Semana')
+            fig = px.line(df_semanal, x='semana', y='numero_cajas', title='Cajas Cosechadas por Semana', markers=True)
+            fig.update_traces(line=dict(color='#2a6b3c', width=3))
             st.plotly_chart(fig, use_container_width=True)
     
     with col2:
         if not df_cosechas.empty:
             df_cosechas['invernadero_nombre'] = df_cosechas['invernaderos'].apply(lambda x: x['nombre'] if x else 'Desconocido')
             df_inv = df_cosechas.groupby('invernadero_nombre')['numero_cajas'].sum().reset_index().sort_values('numero_cajas', ascending=True)
-            fig = px.bar(df_inv, x='numero_cajas', y='invernadero_nombre', orientation='h', title='Cajas por Invernadero')
+            fig = px.bar(df_inv, x='numero_cajas', y='invernadero_nombre', orientation='h',
+                        title='Cajas por Invernadero',
+                        color='numero_cajas', color_continuous_scale='Greens')
+            fig.update_layout(plot_bgcolor='white', height=400)
             st.plotly_chart(fig, use_container_width=True)
     
+    # ANÁLISIS DE PRODUCCIÓN
     st.markdown('<div class="section-title">📈 Análisis de Producción</div>', unsafe_allow_html=True)
     
     col1, col2 = st.columns(2)
@@ -3226,17 +3396,20 @@ def mostrar_dashboard():
             fig = go.Figure()
             if not df_cosechas.empty:
                 df_cosech_semanal = df_cosechas.groupby('semana')['numero_cajas'].sum().reset_index()
-                fig.add_trace(go.Scatter(x=df_cosech_semanal['semana'], y=df_cosech_semanal['numero_cajas'], mode='lines+markers', name='Producción'))
+                fig.add_trace(go.Scatter(x=df_cosech_semanal['semana'], y=df_cosech_semanal['numero_cajas'], mode='lines+markers', name='Producción', line=dict(color='#2a6b3c', width=3)))
             if not df_envios.empty:
                 df_env_semanal = df_envios.groupby('semana')['cantidad_cajas'].sum().reset_index()
-                fig.add_trace(go.Scatter(x=df_env_semanal['semana'], y=df_env_semanal['cantidad_cajas'], mode='lines+markers', name='Envíos'))
-            fig.update_layout(title='Producción vs Envíos por Semana')
+                fig.add_trace(go.Scatter(x=df_env_semanal['semana'], y=df_env_semanal['cantidad_cajas'], mode='lines+markers', name='Envíos', line=dict(color='#e67e22', width=3)))
+            fig.update_layout(title='Producción vs Envíos por Semana', xaxis_title='Semana', yaxis_title='Cajas', plot_bgcolor='white', height=400)
             st.plotly_chart(fig, use_container_width=True)
     
     with col2:
         if not df_cosechas.empty:
             df_prod = df_cosechas.groupby(['tipo_cosecha', 'presentacion'])['numero_cajas'].sum().reset_index()
-            fig = px.bar(df_prod, x='tipo_cosecha', y='numero_cajas', color='presentacion', title='Producción por Tipo y Presentación', barmode='group')
+            fig = px.bar(df_prod, x='tipo_cosecha', y='numero_cajas', color='presentacion',
+                        title='Producción por Tipo y Presentación', barmode='group',
+                        color_discrete_sequence=['#2a6b3c', '#55b36a'])
+            fig.update_layout(plot_bgcolor='white', height=400)
             st.plotly_chart(fig, use_container_width=True)
 
 def mostrar_generar_qr():
