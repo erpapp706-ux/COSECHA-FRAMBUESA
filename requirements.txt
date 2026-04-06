@@ -9,4 +9,3 @@ reportlab
 numpy
 openpyxl
 pytz
-pyzbar
