@@ -9,10 +9,8 @@ import os
 import json
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
-from reportlab.lib.utils import ImageReader
 import plotly.express as px
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import cv2
 import numpy as np
 from pyzbar.pyzbar import decode
@@ -24,9 +22,7 @@ from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode
 import av
 from queue import Queue
 from supabase.lib.client_options import ClientOptions
-import bcrypt
 from functools import wraps
-import asyncio
 from dateutil import tz
 
 # ==========================================
@@ -140,10 +136,18 @@ def register_user(email, password, nombre, rol='supervisor', permisos=None, inve
     try:
         response = supabase.auth.sign_up({"email": email, "password": password, "options": {"data": {"nombre": nombre}}})
         if response.user:
-            permisos_default = {"gestion_personal": False, "registro_cosecha": True, "registro_asistencia": True, "avance_cosecha": True, "traslado_camara_fria": True, "gestion_merma": True, "proyecciones": True, "generar_qr": False, "reportes": True, "catalogos": False, "gestion_invernaderos": False, "dashboard": True, "pesaje_cajas": True, "cajas_mesa": True, "cierre_dia": False, "gestion_usuarios": False, "auditoria_diaria": True}
+            permisos_default = {
+                "registro_cosecha": True, "dashboard": True, "proyecciones": True, "control_asistencia": True,
+                "avance_cosecha": True, "traslado_camara_fria": True, "gestion_merma": True, "cajas_mesa": True,
+                "registros_qr": True, "reportes": True, "gestion_invernaderos": False, "gestion_personal": False,
+                "gestion_usuarios": False, "generar_qr": False, "catalogos": False, "cierre_dia": False
+            }
             if permisos:
                 permisos_default.update(permisos)
-            supabase.table('perfiles_usuario').insert({'id': response.user.id, 'email': email, 'nombre': nombre, 'rol': rol, 'permisos': permisos_default, 'invernaderos_asignados': invernaderos_asignados or []}).execute()
+            supabase.table('perfiles_usuario').insert({
+                'id': response.user.id, 'email': email, 'nombre': nombre, 'rol': rol,
+                'permisos': permisos_default, 'invernaderos_asignados': invernaderos_asignados or []
+            }).execute()
             return {'success': True, 'message': 'Usuario registrado exitosamente'}
     except Exception as e:
         return {'success': False, 'error': str(e)}
@@ -208,6 +212,153 @@ def show_login_page():
                     else:
                         st.error("Complete todos los campos")
             st.markdown('</div>', unsafe_allow_html=True)
+
+# ==========================================
+# FUNCIONES DE PERMISOS Y ASIGNACIONES (NUEVO)
+# ==========================================
+
+def get_permisos_modulos(usuario_id):
+    """Obtiene los permisos de módulos para un usuario"""
+    try:
+        result = supabase.table('perfiles_usuario').select('permisos').eq('id', usuario_id).execute()
+        if result.data:
+            return result.data[0].get('permisos', {})
+    except:
+        pass
+    return {}
+
+def usuario_puede_ver_modulo(usuario_id, modulo):
+    """Verifica si un usuario puede ver un módulo específico"""
+    if st.session_state.get('user_rol') == 'admin':
+        return True
+    
+    permisos = get_permisos_modulos(usuario_id)
+    return permisos.get(modulo, False)
+
+def get_modulos_visibles(usuario_id):
+    """Obtiene la lista de módulos que el usuario puede ver"""
+    todos_modulos = {
+        "registro_cosecha": "🌾 Registro Cosecha",
+        "dashboard": "📊 Dashboard",
+        "proyecciones": "📈 Proyecciones",
+        "control_asistencia": "🕐 Control Asistencia",
+        "avance_cosecha": "📊 Avance Cosecha",
+        "traslado_camara_fria": "❄️ Traslado a Cámara Fría",
+        "gestion_merma": "🗑️ Gestión Merma",
+        "cajas_mesa": "📦 Cajas en Mesa",
+        "registros_qr": "📊 Registros QR",
+        "reportes": "📋 Reportes",
+        "gestion_invernaderos": "🏭 Gestión Invernaderos",
+        "gestion_personal": "👥 Gestión Personal",
+        "gestion_usuarios": "👥 Gestión Usuarios",
+        "generar_qr": "📱 Generar QR",
+        "catalogos": "📚 Catálogos",
+        "cierre_dia": "🔒 Cierre de Día"
+    }
+    
+    if st.session_state.get('user_rol') == 'admin':
+        return todos_modulos
+    
+    permisos = get_permisos_modulos(usuario_id)
+    modulos_visibles = {}
+    for key, name in todos_modulos.items():
+        if permisos.get(key, False):
+            modulos_visibles[key] = name
+    
+    return modulos_visibles
+
+def get_invernaderos_asignados_dia(usuario_id, fecha=None):
+    """Obtiene los invernaderos asignados a un usuario para una fecha específica"""
+    if not fecha:
+        fecha = get_mexico_date()
+    
+    if st.session_state.get('user_rol') == 'admin':
+        return get_all_invernaderos()
+    
+    try:
+        # Verificar asignaciones específicas del día
+        result = supabase.table('asignaciones_invernaderos_dia').select('invernadero_id, invernaderos:invernadero_id(nombre, ubicacion, lineas_totales)').eq('usuario_id', usuario_id).eq('fecha', fecha.isoformat()).execute()
+        
+        if result.data:
+            return [(row['invernadero_id'], row['invernaderos']['nombre'], row['invernaderos']['ubicacion'], row['invernaderos'].get('lineas_totales', 40)) for row in result.data]
+        
+        # Si no hay asignaciones específicas, usar las generales
+        perfil = supabase.table('perfiles_usuario').select('invernaderos_asignados').eq('id', usuario_id).execute()
+        if perfil.data and perfil.data[0].get('invernaderos_asignados'):
+            invernaderos_ids = perfil.data[0]['invernaderos_asignados']
+            result = supabase.table('invernaderos').select('id, nombre, ubicacion, lineas_totales').in_('id', invernaderos_ids).eq('activo', True).execute()
+            return [(row['id'], row['nombre'], row['ubicacion'], row.get('lineas_totales', 40)) for row in result.data] if result.data else []
+        
+        return []
+    except Exception as e:
+        return []
+
+def asignar_invernaderos_dia(usuario_id, invernaderos_ids, fecha, asignado_por):
+    """Asigna invernaderos específicos para un día"""
+    try:
+        # Eliminar asignaciones existentes para esa fecha
+        supabase.table('asignaciones_invernaderos_dia').delete().eq('usuario_id', usuario_id).eq('fecha', fecha.isoformat()).execute()
+        
+        # Insertar nuevas asignaciones
+        for inv_id in invernaderos_ids:
+            supabase.table('asignaciones_invernaderos_dia').insert({
+                'usuario_id': usuario_id,
+                'invernadero_id': inv_id,
+                'fecha': fecha.isoformat(),
+                'asignado_por': asignado_por
+            }).execute()
+        
+        invalidar_cache()
+        return True, f"✅ Asignación actualizada para {fecha}"
+    except Exception as e:
+        return False, f"❌ Error: {str(e)}"
+
+def verificar_acceso_invernadero(usuario_id, invernadero_id, fecha=None):
+    """Verifica si el usuario tiene acceso a un invernadero en una fecha específica"""
+    if not fecha:
+        fecha = get_mexico_date()
+    
+    if st.session_state.get('user_rol') == 'admin':
+        return True
+    
+    try:
+        # Verificar asignación específica del día
+        result = supabase.table('asignaciones_invernaderos_dia').select('id').eq('usuario_id', usuario_id).eq('invernadero_id', invernadero_id).eq('fecha', fecha.isoformat()).execute()
+        if result.data:
+            return True
+        
+        # Verificar asignaciones generales
+        perfil = supabase.table('perfiles_usuario').select('invernaderos_asignados').eq('id', usuario_id).execute()
+        if perfil.data and perfil.data[0].get('invernaderos_asignados'):
+            return invernadero_id in perfil.data[0]['invernaderos_asignados']
+        
+        return False
+    except:
+        return False
+
+def get_asignaciones_por_dia(usuario_id, fecha_inicio=None, fecha_fin=None):
+    """Obtiene el historial de asignaciones por día"""
+    try:
+        query = supabase.table('asignaciones_invernaderos_dia').select('*, invernaderos:invernadero_id(nombre), perfiles_usuario!asignado_por(nombre)').eq('usuario_id', usuario_id)
+        
+        if fecha_inicio:
+            query = query.gte('fecha', fecha_inicio.isoformat())
+        if fecha_fin:
+            query = query.lte('fecha', fecha_fin.isoformat())
+        
+        result = query.order('fecha', desc=True).execute()
+        
+        data = []
+        for row in result.data:
+            data.append({
+                'fecha': row['fecha'],
+                'invernadero': row['invernaderos']['nombre'] if row['invernaderos'] else 'N/A',
+                'asignado_por': row['perfiles_usuario']['nombre'] if row['perfiles_usuario'] else 'Sistema'
+            })
+        
+        return pd.DataFrame(data)
+    except:
+        return pd.DataFrame()
 
 # ==========================================
 # FUNCIONES DE UTILIDAD
@@ -283,14 +434,10 @@ def get_all_invernaderos():
         return []
 
 def get_invernaderos_usuario():
-    if st.session_state.get('user_rol') == 'admin':
-        return get_all_invernaderos()
-    else:
-        invernaderos_asignados = st.session_state.get('user_invernaderos', [])
-        if not invernaderos_asignados:
-            return []
-        result = supabase.table('invernaderos').select('id, nombre, ubicacion, lineas_totales').in_('id', invernaderos_asignados).eq('activo', True).execute()
-        return [(row['id'], row['nombre'], row['ubicacion'], row.get('lineas_totales', 40)) for row in result.data] if result.data else []
+    """Obtiene invernaderos según asignaciones del día"""
+    usuario_id = st.session_state.get('user_id')
+    fecha_actual = get_mexico_date()
+    return get_invernaderos_asignados_dia(usuario_id, fecha_actual)
 
 def get_invernaderos():
     return get_all_invernaderos()
@@ -480,9 +627,9 @@ def get_pesadores():
 # FUNCIONES PARA INVERNADEROS
 # ==========================================
 
-def add_invernadero(nombre, ubicacion):
+def add_invernadero(nombre, ubicacion, lineas_totales=40):
     try:
-        supabase.table('invernaderos').insert({'nombre': nombre.strip().upper(), 'ubicacion': ubicacion, 'activo': True}).execute()
+        supabase.table('invernaderos').insert({'nombre': nombre.strip().upper(), 'ubicacion': ubicacion, 'lineas_totales': lineas_totales, 'activo': True}).execute()
         invalidar_cache()
         return True, "✅ Invernadero agregado correctamente"
     except Exception as e:
@@ -490,9 +637,9 @@ def add_invernadero(nombre, ubicacion):
             return False, "❌ Este invernadero ya existe"
         return False, f"❌ Error: {str(e)}"
 
-def update_invernadero(invernadero_id, nombre, ubicacion):
+def update_invernadero(invernadero_id, nombre, ubicacion, lineas_totales):
     try:
-        supabase.table('invernaderos').update({'nombre': nombre.strip().upper(), 'ubicacion': ubicacion}).eq('id', invernadero_id).execute()
+        supabase.table('invernaderos').update({'nombre': nombre.strip().upper(), 'ubicacion': ubicacion, 'lineas_totales': lineas_totales}).eq('id', invernadero_id).execute()
         invalidar_cache()
         return True, "✅ Invernadero actualizado correctamente"
     except Exception as e:
@@ -556,14 +703,13 @@ def get_avance_hoy_por_invernadero():
                 'porcentaje': row['porcentaje'], 'supervisor': row['supervisor'], 'observaciones': row['observaciones'],
                 'es_acumulado': row['es_acumulado'], 'invernadero_nombre': row['invernaderos']['nombre'] if row['invernaderos'] else 'Desconocido'
             })
-        invernaderos = get_invernaderos()
+        invernaderos = get_all_invernaderos()
         inv_con_datos = set([d['invernadero_id'] for d in data])
-        for inv_id, inv_nombre, inv_ubic, _ in invernaderos:
+        for inv_id, inv_nombre, inv_ubic, lineas in invernaderos:
             if inv_id not in inv_con_datos:
-                lineas_totales = get_lineas_totales_por_invernadero(inv_id, inv_nombre)
                 data.append({
                     'id': None, 'invernadero_id': inv_id, 'fecha': fecha_hoy, 'hora': None, 'turno': None,
-                    'semana': get_mexico_week(), 'lineas_cosechadas': 0, 'lineas_totales': lineas_totales,
+                    'semana': get_mexico_week(), 'lineas_cosechadas': 0, 'lineas_totales': lineas,
                     'porcentaje': 0.0, 'supervisor': None, 'observaciones': None, 'es_acumulado': 0, 'invernadero_nombre': inv_nombre
                 })
         return pd.DataFrame(data)
@@ -753,7 +899,7 @@ def get_detalle_cajas_por_invernadero(invernadero_id):
 
 def get_resumen_cajas_por_invernadero():
     try:
-        invernaderos = get_invernaderos()
+        invernaderos = get_all_invernaderos()
         resumen = []
         for inv_id, inv_nombre, _, _ in invernaderos:
             result = supabase.table('cosechas').select('numero_cajas, cajas_enviadas').eq('invernadero_id', inv_id).execute()
@@ -1587,10 +1733,13 @@ def mostrar_formulario_cosecha_instant(id_trabajador, nombre, mostrar_invernader
     st.markdown("### 📋 Registrar Cosecha")
     invernadero_id = None
     if mostrar_invernadero:
-        invernaderos = get_invernaderos()
+        invernaderos = get_invernaderos_usuario()  # Usar solo invernaderos asignados
         if invernaderos:
             invernadero = st.selectbox("🏭 Invernadero:", invernaderos, format_func=lambda x: f"{x[1]} - {x[2]}", key="invernadero_instant")
             invernadero_id = invernadero[0]
+        else:
+            st.error("❌ No tienes invernaderos asignados para hoy")
+            return
     fecha_actual = get_mexico_date()
     dia_espanol = get_mexico_day_spanish()
     col1, col2, col3 = st.columns(3)
@@ -1652,13 +1801,13 @@ def mostrar_formulario_cosecha_instant(id_trabajador, nombre, mostrar_invernader
 
 def mostrar_formulario_asistencia_instant(id_trabajador, nombre):
     st.markdown("### 📋 Registrar Asistencia")
-    invernaderos = get_invernaderos()
+    invernaderos = get_invernaderos_usuario()  # Usar solo invernaderos asignados
     if invernaderos:
         invernadero = st.selectbox("🏭 Invernadero:", invernaderos, format_func=lambda x: f"{x[1]} - {x[2]}", key="invernadero_asistencia_instant")
         invernadero_id = invernadero[0]
     else:
         invernadero_id = None
-        st.warning("No hay invernaderos")
+        st.warning("No tienes invernaderos asignados para hoy")
     tipo_evento = st.selectbox("📌 Evento:", ["entrada_invernadero", "salida_comer", "regreso_comida", "salida_invernadero"], format_func=lambda x: {'entrada_invernadero': '🚪 Entrada a Invernadero', 'salida_comer': '🍽️ Salida a Comer', 'regreso_comida': '✅ Regreso de Comida', 'salida_invernadero': '🚪 Salida de Invernadero'}[x], key="tipo_instant")
     st.info(f"👤 Trabajador: **{nombre}**")
     col1, col2 = st.columns(2)
@@ -1754,7 +1903,7 @@ def get_report_nomina_activa(depto_nombre=None, subdepto_nombre=None):
         return pd.DataFrame(), pd.DataFrame()
 
 # ==========================================
-# FUNCIONES DE GESTIÓN DE USUARIOS
+# FUNCIONES DE GESTIÓN DE USUARIOS (ACTUALIZADA)
 # ==========================================
 
 def get_all_users():
@@ -1780,8 +1929,182 @@ def update_system_config(clave, valor):
     except:
         return False
 
+def mostrar_gestion_usuarios():
+    st.header("👥 Gestión de Usuarios y Permisos")
+    
+    if st.session_state.get('user_rol') != 'admin':
+        st.error("❌ No tienes permiso para acceder a esta sección")
+        return
+    
+    tab1, tab2, tab3 = st.tabs(["📋 Usuarios y Permisos", "📅 Asignación por Día", "📊 Historial Asignaciones"])
+    
+    with tab1:
+        usuarios = get_all_users()
+        if not usuarios.empty:
+            for _, usuario in usuarios.iterrows():
+                with st.expander(f"👤 {usuario['nombre']} - {usuario['email']} ({usuario['rol']})"):
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        st.subheader("⚙️ Configuración General")
+                        nuevo_rol = st.selectbox("Rol", ["admin", "supervisor"], index=0 if usuario['rol'] == 'admin' else 1, key=f"rol_{usuario['id']}")
+                        
+                        invernaderos = get_all_invernaderos()
+                        invernaderos_asignados_actuales = usuario.get('invernaderos_asignados', [])
+                        invernaderos_asignados = st.multiselect(
+                            "Invernaderos asignados (base)", 
+                            [inv[1] for inv in invernaderos], 
+                            default=[inv[1] for inv in invernaderos if inv[0] in invernaderos_asignados_actuales],
+                            key=f"inv_base_{usuario['id']}"
+                        )
+                        invernaderos_ids_base = [inv[0] for inv in invernaderos if inv[1] in invernaderos_asignados]
+                    
+                    with col2:
+                        st.subheader("📱 Permisos por Módulo")
+                        permisos_actuales = usuario.get('permisos', {})
+                        
+                        modulos_por_categoria = {
+                            "📊 Producción": ["registro_cosecha", "avance_cosecha", "traslado_camara_fria", "gestion_merma", "cajas_mesa"],
+                            "👥 Personal": ["control_asistencia", "gestion_personal", "reportes"],
+                            "📈 Planificación": ["proyecciones", "dashboard"],
+                            "🔧 Administración": ["gestion_invernaderos", "catalogos", "generar_qr", "registros_qr"],
+                            "⚙️ Sistema": ["gestion_usuarios", "cierre_dia"]
+                        }
+                        
+                        nuevos_permisos = {}
+                        for categoria, modulos in modulos_por_categoria.items():
+                            st.markdown(f"**{categoria}**")
+                            for modulo in modulos:
+                                label = {
+                                    "registro_cosecha": "🌾 Registro Cosecha",
+                                    "avance_cosecha": "📊 Avance Cosecha",
+                                    "traslado_camara_fria": "❄️ Traslado a Cámara Fría",
+                                    "gestion_merma": "🗑️ Gestión Merma",
+                                    "cajas_mesa": "📦 Cajas en Mesa",
+                                    "control_asistencia": "🕐 Control Asistencia",
+                                    "gestion_personal": "👥 Gestión Personal",
+                                    "reportes": "📋 Reportes",
+                                    "proyecciones": "📈 Proyecciones",
+                                    "dashboard": "📊 Dashboard",
+                                    "gestion_invernaderos": "🏭 Gestión Invernaderos",
+                                    "catalogos": "📚 Catálogos",
+                                    "generar_qr": "📱 Generar QR",
+                                    "registros_qr": "📊 Registros QR",
+                                    "gestion_usuarios": "👥 Gestión Usuarios",
+                                    "cierre_dia": "🔒 Cierre de Día"
+                                }.get(modulo, modulo)
+                                
+                                nuevos_permisos[modulo] = st.checkbox(
+                                    label, 
+                                    value=permisos_actuales.get(modulo, False), 
+                                    key=f"perm_{usuario['id']}_{modulo}"
+                                )
+                            st.markdown("---")
+                    
+                    if st.button("💾 Guardar Cambios", key=f"save_{usuario['id']}"):
+                        success, msg = update_user_permissions(usuario['id'], nuevo_rol, nuevos_permisos, invernaderos_ids_base)
+                        if success:
+                            st.success(msg)
+                            st.rerun()
+                        else:
+                            st.error(msg)
+        else:
+            st.info("No hay usuarios registrados")
+    
+    with tab2:
+        st.subheader("📅 Asignación de Invernaderos por Día")
+        st.markdown("""
+        <div style="background-color: #e3f2fd; padding: 15px; border-radius: 10px; margin-bottom: 20px;">
+            <strong>📌 Instrucciones:</strong><br>
+            • Selecciona un supervisor y una fecha específica<br>
+            • Asigna los invernaderos que podrá usar SOLO en ese día<br>
+            • Esto es útil para cambios temporales o coberturas
+        </div>
+        """, unsafe_allow_html=True)
+        
+        usuarios_df = get_all_users()
+        supervisores = usuarios_df[usuarios_df['rol'] == 'supervisor'] if not usuarios_df.empty else pd.DataFrame()
+        
+        if not supervisores.empty:
+            supervisor_seleccionado = st.selectbox(
+                "Seleccionar Supervisor", 
+                supervisores.apply(lambda x: f"{x['id']} - {x['nombre']} ({x['email']})", axis=1).tolist(),
+                key="asignacion_supervisor"
+            )
+            supervisor_id = supervisor_seleccionado.split(' - ')[0] if supervisor_seleccionado else None
+            
+            fecha_asignacion = st.date_input("Fecha de asignación", get_mexico_date(), key="fecha_asignacion")
+            
+            if supervisor_id:
+                asignaciones_actuales = get_invernaderos_asignados_dia(supervisor_id, fecha_asignacion)
+                st.info(f"📌 Asignaciones actuales para {fecha_asignacion}: {len(asignaciones_actuales)} invernaderos")
+                
+                todos_invernaderos = get_all_invernaderos()
+                invernaderos_disponibles = [f"{inv[1]} - {inv[2]}" for inv in todos_invernaderos]
+                invernaderos_seleccionados = st.multiselect(
+                    "Invernaderos para este día",
+                    invernaderos_disponibles,
+                    default=[f"{inv[1]} - {inv[2]}" for inv in asignaciones_actuales],
+                    key="invernaderos_dia"
+                )
+                
+                invernaderos_ids = []
+                for inv_seleccionado in invernaderos_seleccionados:
+                    for inv in todos_invernaderos:
+                        if f"{inv[1]} - {inv[2]}" == inv_seleccionado:
+                            invernaderos_ids.append(inv[0])
+                            break
+                
+                if st.button("✅ Asignar Invernaderos para este Día", type="primary", use_container_width=True):
+                    success, msg = asignar_invernaderos_dia(supervisor_id, invernaderos_ids, fecha_asignacion, st.session_state.get('user_id'))
+                    if success:
+                        st.success(msg)
+                        st.balloons()
+                        st.rerun()
+                    else:
+                        st.error(msg)
+        else:
+            st.warning("No hay supervisores registrados para asignar")
+    
+    with tab3:
+        st.subheader("📊 Historial de Asignaciones por Día")
+        
+        todos_usuarios = get_all_users()
+        if not todos_usuarios.empty:
+            usuario_historial = st.selectbox(
+                "Ver historial de:", 
+                todos_usuarios.apply(lambda x: f"{x['id']} - {x['nombre']} ({x['rol']})", axis=1).tolist(),
+                key="historial_usuario"
+            )
+            usuario_id_hist = usuario_historial.split(' - ')[0] if usuario_historial else None
+            
+            if usuario_id_hist:
+                col1, col2 = st.columns(2)
+                with col1:
+                    fecha_hist_inicio = st.date_input("Fecha inicio", get_mexico_date() - timedelta(days=30), key="hist_inicio")
+                with col2:
+                    fecha_hist_fin = st.date_input("Fecha fin", get_mexico_date(), key="hist_fin")
+                
+                historial = get_asignaciones_por_dia(usuario_id_hist, fecha_hist_inicio, fecha_hist_fin)
+                
+                if not historial.empty:
+                    st.dataframe(historial, use_container_width=True)
+                    
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Total días con asignación", historial['fecha'].nunique())
+                    with col2:
+                        st.metric("Promedio invernaderos/día", len(historial) / max(historial['fecha'].nunique(), 1))
+                    with col3:
+                        st.metric("Última asignación", historial.iloc[0]['fecha'] if not historial.empty else "N/A")
+                    
+                    output = export_to_excel(historial, "Historial_Asignaciones")
+                    st.download_button("📥 Exportar historial a Excel", data=output, file_name=f"historial_asignaciones_{usuario_id_hist}.xlsx")
+                else:
+                    st.info("No hay asignaciones especiales para este usuario en el período seleccionado")
+
 # ==========================================
-# INTERFACES DE USUARIO
+# INTERFACES DE USUARIO (MÓDULOS PRINCIPALES)
 # ==========================================
 
 def mostrar_gestion_personal():
@@ -1960,13 +2283,13 @@ def formulario_cosecha_manual():
         trabajador_id = int(trabajador_seleccionado.split(' - ')[0]) if trabajador_seleccionado else None
     else:
         trabajador_id = None
-    invernaderos = get_invernaderos()
+    invernaderos = get_invernaderos_usuario()  # Usar solo invernaderos asignados
     if invernaderos:
         invernadero_seleccionado = st.selectbox("Invernadero *", invernaderos, format_func=lambda x: f"{x[1]} - {x[2]}", key="invernadero_manual_cosecha")
         invernadero_id = invernadero_seleccionado[0]
     else:
         invernadero_id = None
-        st.error("No hay invernaderos registrados")
+        st.error("No tienes invernaderos asignados para hoy")
     tipo_cosecha = st.radio("Tipo de Cosecha:", ["Nacional", "Exportación"], horizontal=True, key="tipo_cosecha_manual")
     if tipo_cosecha == "Nacional":
         calidad = st.selectbox("Calidad:", ["Salmon", "Sobretono"], key="calidad_manual")
@@ -2019,12 +2342,13 @@ def mostrar_control_asistencia():
                     trabajador_id = int(trabajador_seleccionado.split(' - ')[0]) if trabajador_seleccionado else None
                 else:
                     trabajador_id = None
-                invernaderos = get_invernaderos()
+                invernaderos = get_invernaderos_usuario()  # Usar solo invernaderos asignados
                 if invernaderos:
                     invernadero = st.selectbox("Invernadero:", invernaderos, format_func=lambda x: f"{x[1]} - {x[2]}", key="invernadero_asistencia_manual")
                     invernadero_id = invernadero[0]
                 else:
                     invernadero_id = None
+                    st.warning("No tienes invernaderos asignados para hoy")
                 tipo_evento = st.selectbox("Tipo de Evento:", ["entrada_invernadero", "salida_comer", "regreso_comida", "salida_invernadero"], format_func=lambda x: {'entrada_invernadero': '🚪 Entrada a Invernadero', 'salida_comer': '🍽️ Salida a Comer', 'regreso_comida': '✅ Regreso de Comida', 'salida_invernadero': '🚪 Salida de Invernadero'}[x], key="tipo_evento_asistencia_manual")
                 if st.button("✅ Registrar Evento", type="primary", use_container_width=True, key="btn_registrar_evento_manual"):
                     if not trabajador_id:
@@ -2228,7 +2552,7 @@ def mostrar_avance_cosecha():
         st.markdown("---")
         col1, col2, col3 = st.columns(3)
         with col1:
-            invernaderos = get_invernaderos()
+            invernaderos = get_invernaderos_usuario()  # Usar solo invernaderos asignados
             if invernaderos:
                 invernadero_seleccionado = st.selectbox("Seleccionar Invernadero *", invernaderos, format_func=lambda x: f"{x[1]} - {x[2]}", key="invernadero_avance")
                 invernadero_id = invernadero_seleccionado[0]
@@ -2236,7 +2560,7 @@ def mostrar_avance_cosecha():
                 lineas_totales = get_lineas_totales_por_invernadero(invernadero_id, invernadero_nombre)
                 st.info(f"📏 Total de líneas en {invernadero_nombre}: {lineas_totales}")
             else:
-                st.error("No hay invernaderos registrados")
+                st.error("No tienes invernaderos asignados para hoy")
                 invernadero_id = None
                 invernadero_nombre = None
                 lineas_totales = 0
@@ -2327,12 +2651,12 @@ def mostrar_traslados_camara_fria():
         st.markdown("---")
         col1, col2 = st.columns(2)
         with col1:
-            invernaderos = get_invernaderos()
+            invernaderos = get_invernaderos_usuario()  # Usar solo invernaderos asignados
             if invernaderos:
                 invernadero_seleccionado = st.selectbox("🏭 Invernadero de origen:", invernaderos, format_func=lambda x: f"{x[1]} - {x[2]}", key="invernadero_traslado")
                 invernadero_id = invernadero_seleccionado[0]
             else:
-                st.error("No hay invernaderos registrados")
+                st.error("No tienes invernaderos asignados para hoy")
                 invernadero_id = None
         with col2:
             if invernadero_id:
@@ -2500,7 +2824,7 @@ def mostrar_traslados_camara_fria():
         with col2:
             fecha_hist_fin = st.date_input("Fecha fin:", get_mexico_date(), key="hist_traslado_fin")
         with col3:
-            invernaderos_filtro = [("", "Todos")] + [(id_inv, nombre) for id_inv, nombre, _, _ in get_invernaderos()]
+            invernaderos_filtro = [("", "Todos")] + [(id_inv, nombre) for id_inv, nombre, _, _ in get_all_invernaderos()]
             invernadero_filtro = st.selectbox("Filtrar por invernadero:", invernaderos_filtro, format_func=lambda x: x[1] if isinstance(x, tuple) else x, key="invernadero_historial_traslado")
         invernadero_id_filtro = invernadero_filtro[0] if invernadero_filtro and invernadero_filtro[0] else None
         traslados = get_traslados_camara_fria(fecha_hist_inicio, fecha_hist_fin, invernadero_id_filtro)
@@ -2535,12 +2859,13 @@ def mostrar_gestion_merma():
         with st.form("form_merma"):
             col1, col2 = st.columns(2)
             with col1:
-                invernaderos = get_invernaderos()
+                invernaderos = get_invernaderos_usuario()  # Usar solo invernaderos asignados
                 if invernaderos:
                     invernadero = st.selectbox("Invernadero *", invernaderos, format_func=lambda x: f"{x[1]} - {x[2]}", key="invernadero_merma")
                     invernadero_id = invernadero[0]
                 else:
                     invernadero_id = None
+                    st.error("No tienes invernaderos asignados para hoy")
             with col2:
                 supervisor_nombre = st.text_input("Nombre del Supervisor *", key="supervisor_merma")
             kilos_merma = st.number_input("Kilos de Merma *", min_value=0.0, step=0.5, key="kilos_merma")
@@ -2584,7 +2909,7 @@ def mostrar_gestion_merma():
         with col2:
             fecha_hist_fin = st.date_input("Fecha fin:", get_mexico_date(), key="merma_hist_fin")
         with col3:
-            invernaderos_filtro = [("", "Todos")] + [(id_inv, nombre) for id_inv, nombre, _, _ in get_invernaderos()]
+            invernaderos_filtro = [("", "Todos")] + [(id_inv, nombre) for id_inv, nombre, _, _ in get_all_invernaderos()]
             invernadero_filtro = st.selectbox("Filtrar por invernadero:", invernaderos_filtro, format_func=lambda x: x[1] if isinstance(x, tuple) else x, key="merma_invernadero_filtro")
         invernadero_id_filtro = invernadero_filtro[0] if invernadero_filtro and invernadero_filtro[0] else None
         merma = get_merma(fecha_hist_inicio, fecha_hist_fin, invernadero_id_filtro)
@@ -2602,13 +2927,12 @@ def mostrar_gestion_invernaderos():
             lineas_totales = st.number_input("Líneas totales", min_value=1, max_value=100, value=40, key="lineas_invernadero")
             if st.form_submit_button("Guardar Invernadero"):
                 if nombre_invernadero and ubicacion_invernadero:
-                    try:
-                        supabase.table('invernaderos').insert({'nombre': nombre_invernadero.strip().upper(), 'ubicacion': ubicacion_invernadero, 'lineas_totales': lineas_totales, 'activo': True}).execute()
-                        invalidar_cache()
-                        st.success("✅ Invernadero agregado correctamente")
+                    success, msg = add_invernadero(nombre_invernadero, ubicacion_invernadero, lineas_totales)
+                    if success:
+                        st.success(msg)
                         st.rerun()
-                    except Exception as e:
-                        st.error(f"❌ Error: {str(e)}")
+                    else:
+                        st.error(msg)
                 else:
                     st.error("Complete todos los campos")
     st.markdown("---")
@@ -2640,14 +2964,13 @@ def mostrar_gestion_invernaderos():
                         col1, col2 = st.columns(2)
                         with col1:
                             if st.form_submit_button("💾 Guardar"):
-                                try:
-                                    supabase.table('invernaderos').update({'nombre': nuevo_nombre.strip().upper(), 'ubicacion': nueva_ubicacion, 'lineas_totales': nuevas_lineas}).eq('id', id_inv).execute()
-                                    invalidar_cache()
+                                success, msg = update_invernadero(id_inv, nuevo_nombre, nueva_ubicacion, nuevas_lineas)
+                                if success:
+                                    st.success(msg)
                                     del st.session_state[f'editing_inv_{id_inv}']
-                                    st.success("✅ Invernadero actualizado")
                                     st.rerun()
-                                except Exception as e:
-                                    st.error(f"❌ Error: {str(e)}")
+                                else:
+                                    st.error(msg)
                         with col2:
                             if st.form_submit_button("❌ Cancelar"):
                                 del st.session_state[f'editing_inv_{id_inv}']
@@ -2940,7 +3263,7 @@ def mostrar_dashboard_general():
         fecha_inicio = st.date_input("Fecha inicio", fecha_default_inicio, key="dash_fecha_inicio")
         fecha_fin = st.date_input("Fecha fin", fecha_default_fin, key="dash_fecha_fin")
         st.markdown("### 🏭 Invernadero")
-        invernaderos = get_invernaderos()
+        invernaderos = get_invernaderos_usuario()  # Usar solo invernaderos asignados
         invernaderos_opciones = ["Todos"] + [nombre for _, nombre, _, _ in invernaderos]
         invernadero_seleccionado = st.selectbox("Seleccionar invernadero", invernaderos_opciones, key="dash_invernadero")
         st.markdown("### 🌾 Tipo de Cultivo")
@@ -3142,52 +3465,6 @@ def mostrar_dashboard_general():
         if not df_incidencias.empty:
             st.dataframe(df_incidencias.head(10), use_container_width=True)
 
-def mostrar_gestion_usuarios():
-    st.header("👥 Gestión de Usuarios")
-    if st.session_state.get('user_rol') != 'admin':
-        st.error("❌ No tienes permiso para acceder a esta sección")
-        return
-    tab1, tab2 = st.tabs(["📋 Usuarios", "⚙️ Configuración del Sistema"])
-    with tab1:
-        usuarios = get_all_users()
-        if not usuarios.empty:
-            for _, usuario in usuarios.iterrows():
-                with st.expander(f"{usuario['nombre']} - {usuario['email']} ({usuario['rol']})"):
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        nuevo_rol = st.selectbox("Rol", ["admin", "supervisor"], index=0 if usuario['rol'] == 'admin' else 1, key=f"rol_{usuario['id']}")
-                        invernaderos = get_all_invernaderos()
-                        invernaderos_asignados_actuales = usuario.get('invernaderos_asignados', [])
-                        invernaderos_asignados = st.multiselect("Invernaderos asignados", [inv[1] for inv in invernaderos], default=[inv[1] for inv in invernaderos if str(inv[0]) in invernaderos_asignados_actuales], key=f"inv_{usuario['id']}")
-                        invernaderos_ids = [str(inv[0]) for inv in invernaderos if inv[1] in invernaderos_asignados]
-                    with col2:
-                        st.markdown("**Permisos:**")
-                        permisos_actuales = usuario.get('permisos', {})
-                        permisos_lista = [("gestion_personal", "👥 Gestión Personal"), ("registro_cosecha", "🌾 Registro Cosecha"), ("registro_asistencia", "🕐 Control Asistencia"), ("avance_cosecha", "📊 Avance Cosecha"), ("traslado_camara_fria", "❄️ Traslado a Cámara Fría"), ("gestion_merma", "🗑️ Gestión Merma"), ("proyecciones", "📈 Proyecciones"), ("generar_qr", "📱 Generar QR"), ("reportes", "📋 Reportes"), ("catalogos", "📚 Catálogos"), ("gestion_invernaderos", "🏭 Gestión Invernaderos"), ("dashboard", "📊 Dashboard"), ("pesaje_cajas", "⚖️ Pesaje Cajas"), ("cajas_mesa", "📦 Cajas en Mesa"), ("cierre_dia", "🔒 Cierre de Día"), ("auditoria_diaria", "📊 Auditoría Diaria")]
-                        nuevos_permisos = {}
-                        for permiso_key, permiso_label in permisos_lista:
-                            nuevos_permisos[permiso_key] = st.checkbox(permiso_label, value=permisos_actuales.get(permiso_key, False), key=f"perm_{usuario['id']}_{permiso_key}")
-                    if st.button("💾 Guardar Cambios", key=f"save_{usuario['id']}"):
-                        success, msg = update_user_permissions(usuario['id'], nuevo_rol, nuevos_permisos, invernaderos_ids)
-                        if success:
-                            st.success(msg)
-                            st.rerun()
-                        else:
-                            st.error(msg)
-        else:
-            st.info("No hay usuarios registrados")
-    with tab2:
-        st.subheader("Configuración del Sistema")
-        registro_manual_asistencia = get_configuracion_sistema('registro_manual_asistencia')
-        registro_manual_cosecha = get_configuracion_sistema('registro_manual_cosecha')
-        nueva_asistencia = st.checkbox("Permitir registro manual de asistencia", value=registro_manual_asistencia)
-        nueva_cosecha = st.checkbox("Permitir registro manual de cosecha", value=registro_manual_cosecha)
-        if st.button("💾 Guardar Configuración"):
-            update_system_config('registro_manual_asistencia', str(nueva_asistencia).lower())
-            update_system_config('registro_manual_cosecha', str(nueva_cosecha).lower())
-            st.success("✅ Configuración guardada")
-            st.rerun()
-
 def mostrar_cierre_dia():
     st.header("📅 Cierre de Día y Auditoría")
     tab1, tab2 = st.tabs(["🔒 Realizar Cierre", "📋 Historial de Cierres"])
@@ -3270,12 +3547,13 @@ def mostrar_cajas_mesa():
         st.subheader("Registrar Cajas en Mesa")
         fecha_actual = get_mexico_date()
         st.markdown(f'<div style="display: flex; gap: 10px; margin-bottom: 20px;"><div class="date-card"><div>📅 FECHA</div><div style="font-size:20px;">{fecha_actual.strftime("%d/%m/%Y")}</div></div><div class="time-card"><div>⏰ HORA</div><div style="font-size:20px;">{get_mexico_time().strftime("%H:%M")}</div></div></div>', unsafe_allow_html=True)
-        invernaderos = get_invernaderos()
+        invernaderos = get_invernaderos_usuario()  # Usar solo invernaderos asignados
         if invernaderos:
             invernadero = st.selectbox("Invernadero", invernaderos, format_func=lambda x: f"{x[1]} - {x[2]}")
             invernadero_id = invernadero[0]
         else:
             invernadero_id = None
+            st.error("No tienes invernaderos asignados para hoy")
         trabajadores = get_all_workers()
         if not trabajadores.empty:
             trabajador = st.selectbox("Trabajador", trabajadores.apply(lambda x: f"{x['id']} - {x['nombre']} {x['apellido_paterno']}", axis=1))
@@ -3328,17 +3606,21 @@ def mostrar_cajas_mesa():
 
 def mostrar_menu_sidebar():
     st.sidebar.markdown('<div class="sidebar-title"><h2>🌾 Sistema Integral</h2><p>Gestión Agrícola</p></div>', unsafe_allow_html=True)
+    
     if st.session_state.get('authenticated', False):
         st.sidebar.markdown(f'<div class="user-info">👤 <strong>{st.session_state.get("user_nombre", "Usuario")}</strong><br>📧 {st.session_state.get("user_email", "")}<br>🎭 Rol: <strong>{st.session_state.get("user_rol", "supervisor").upper()}</strong></div>', unsafe_allow_html=True)
-    if st.session_state.get('user_rol') == 'admin':
-        menu_options = {"🌾 Registro Cosecha": "Registrar producción", "👥 Gestión Personal": "Alta/baja/editar trabajadores", "📊 Dashboard": "Estadísticas generales", "📈 Proyecciones": "Comparativa real vs proyectado", "🕐 Control Asistencia": "Registro entrada/salida", "📊 Avance Cosecha": "Registrar avance por invernadero", "❄️ Traslado a Cámara Fría": "Cajas a cámara fría y pesaje", "🗑️ Gestión Merma": "Registro de merma", "📦 Cajas en Mesa": "Registro de cajas y solicitudes", "📱 Generar QR": "Códigos QR para trabajadores", "📊 Registros QR": "Reportes de escaneos QR", "📋 Reportes": "Reportes y estadísticas", "📚 Catálogos": "Departamentos, puestos, etc.", "🏭 Gestión Invernaderos": "Administrar invernaderos", "👥 Gestión Usuarios": "Administrar usuarios y permisos", "🔒 Cierre de Día": "Auditoría y cierre diario"}
-    else:
-        menu_options = {"🌾 Registro Cosecha": "Registrar producción", "📊 Dashboard": "Estadísticas generales", "📈 Proyecciones": "Comparativa real vs proyectado", "🕐 Control Asistencia": "Registro entrada/salida", "📊 Avance Cosecha": "Registrar avance por invernadero", "❄️ Traslado a Cámara Fría": "Cajas a cámara fría y pesaje", "🗑️ Gestión Merma": "Registro de merma", "📦 Cajas en Mesa": "Registro de cajas y solicitudes", "📊 Registros QR": "Reportes de escaneos QR", "📋 Reportes": "Reportes y estadísticas", "🏭 Gestión Invernaderos": "Administrar invernaderos"}
-    for option, desc in menu_options.items():
-        if st.sidebar.button(option, use_container_width=True, help=desc, key=f"menu_{option.replace(' ', '_')}"):
-            st.session_state.menu = option
+    
+    # Obtener módulos visibles según permisos
+    modulos_visibles = get_modulos_visibles(st.session_state.get('user_id'))
+    
+    # Mostrar solo los módulos permitidos
+    for module_key, module_name in modulos_visibles.items():
+        if st.sidebar.button(module_name, use_container_width=True, key=f"menu_{module_key}"):
+            st.session_state.menu = module_name
             st.rerun()
+    
     st.sidebar.markdown("---")
+    
     if st.sidebar.button("🚪 Cerrar Sesión", use_container_width=True):
         logout_user()
 
@@ -3359,67 +3641,52 @@ def main():
     if not st.session_state.authenticated:
         show_login_page()
         return
+    
     mostrar_menu_sidebar()
-    if st.session_state.menu == "🌾 Registro Cosecha":
-        st.header("🌾 Registro de Cosecha")
-        tab1, tab2 = st.tabs(["📷 Escanear QR", "📝 Registrar Manual"])
-        with tab1:
-            escanear_qr_con_camara(tipo_evento="cosecha", mostrar_invernadero=True)
-        with tab2:
-            if not get_configuracion_sistema('registro_manual_cosecha'):
-                st.warning("⚠️ El registro manual de cosecha está deshabilitado por el administrador")
-            else:
-                formulario_cosecha_manual()
-        with st.expander("📋 Ver Cosechas Registradas"):
-            cosechas = get_cosechas()
-            if not cosechas.empty:
-                st.dataframe(cosechas, use_container_width=True)
-                output = export_to_excel(cosechas, "Cosechas")
-                st.download_button("📥 Exportar a Excel", data=output, file_name=f"cosechas_{get_mexico_date()}.xlsx")
-            else:
-                st.info("No hay cosechas registradas")
-    elif st.session_state.menu == "👥 Gestión Personal":
-        if st.session_state.get('user_rol') != 'admin':
-            st.error("❌ No tienes permisos para acceder a esta sección.")
+    
+    # Mapeo de menús a funciones
+    menu_functions = {
+        "🌾 Registro Cosecha": lambda: (st.header("🌾 Registro de Cosecha"),
+            st.tabs(["📷 Escanear QR", "📝 Registrar Manual"])),
+        "📊 Dashboard": mostrar_dashboard_general,
+        "📈 Proyecciones": mostrar_proyecciones,
+        "🕐 Control Asistencia": mostrar_control_asistencia,
+        "📊 Avance Cosecha": mostrar_avance_cosecha,
+        "❄️ Traslado a Cámara Fría": mostrar_traslados_camara_fria,
+        "🗑️ Gestión Merma": mostrar_gestion_merma,
+        "📦 Cajas en Mesa": mostrar_cajas_mesa,
+        "📱 Generar QR": mostrar_generar_qr if st.session_state.get('user_rol') == 'admin' else lambda: st.error("❌ No tienes permisos"),
+        "📊 Registros QR": mostrar_reportes_qr,
+        "📋 Reportes": mostrar_reportes,
+        "📚 Catálogos": mostrar_catalogos if st.session_state.get('user_rol') == 'admin' else lambda: st.error("❌ No tienes permisos"),
+        "🏭 Gestión Invernaderos": mostrar_gestion_invernaderos,
+        "👥 Gestión Personal": mostrar_gestion_personal if st.session_state.get('user_rol') == 'admin' else lambda: st.error("❌ No tienes permisos"),
+        "👥 Gestión Usuarios": mostrar_gestion_usuarios if st.session_state.get('user_rol') == 'admin' else lambda: st.error("❌ No tienes permisos"),
+        "🔒 Cierre de Día": mostrar_cierre_dia,
+    }
+    
+    # Ejecutar la función correspondiente
+    if st.session_state.menu in menu_functions:
+        if st.session_state.menu == "🌾 Registro Cosecha":
+            st.header("🌾 Registro de Cosecha")
+            tab1, tab2 = st.tabs(["📷 Escanear QR", "📝 Registrar Manual"])
+            with tab1:
+                escanear_qr_con_camara(tipo_evento="cosecha", mostrar_invernadero=True)
+            with tab2:
+                if not get_configuracion_sistema('registro_manual_cosecha'):
+                    st.warning("⚠️ El registro manual de cosecha está deshabilitado por el administrador")
+                else:
+                    formulario_cosecha_manual()
+            with st.expander("📋 Ver Cosechas Registradas"):
+                cosechas = get_cosechas()
+                if not cosechas.empty:
+                    st.dataframe(cosechas, use_container_width=True)
+                    output = export_to_excel(cosechas, "Cosechas")
+                    st.download_button("📥 Exportar a Excel", data=output, file_name=f"cosechas_{get_mexico_date()}.xlsx")
+                else:
+                    st.info("No hay cosechas registradas")
         else:
-            mostrar_gestion_personal()
-    elif st.session_state.menu == "📊 Dashboard":
-        mostrar_dashboard_general()
-    elif st.session_state.menu == "📈 Proyecciones":
-        mostrar_proyecciones()
-    elif st.session_state.menu == "🕐 Control Asistencia":
-        mostrar_control_asistencia()
-    elif st.session_state.menu == "📊 Avance Cosecha":
-        mostrar_avance_cosecha()
-    elif st.session_state.menu == "❄️ Traslado a Cámara Fría":
-        mostrar_traslados_camara_fria()
-    elif st.session_state.menu == "🗑️ Gestión Merma":
-        mostrar_gestion_merma()
-    elif st.session_state.menu == "📦 Cajas en Mesa":
-        mostrar_cajas_mesa()
-    elif st.session_state.menu == "📱 Generar QR":
-        if st.session_state.get('user_rol') != 'admin':
-            st.error("❌ No tienes permisos para acceder a esta sección.")
-        else:
-            mostrar_generar_qr()
-    elif st.session_state.menu == "📊 Registros QR":
-        mostrar_reportes_qr()
-    elif st.session_state.menu == "📋 Reportes":
-        mostrar_reportes()
-    elif st.session_state.menu == "📚 Catálogos":
-        if st.session_state.get('user_rol') != 'admin':
-            st.error("❌ No tienes permisos para acceder a esta sección.")
-        else:
-            mostrar_catalogos()
-    elif st.session_state.menu == "🏭 Gestión Invernaderos":
-        mostrar_gestion_invernaderos()
-    elif st.session_state.menu == "👥 Gestión Usuarios":
-        if st.session_state.get('user_rol') != 'admin':
-            st.error("❌ No tienes permisos para acceder a esta sección.")
-        else:
-            mostrar_gestion_usuarios()
-    elif st.session_state.menu == "🔒 Cierre de Día":
-        mostrar_cierre_dia()
+            menu_functions[st.session_state.menu]()
 
 if __name__ == "__main__":
     main()
