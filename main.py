@@ -398,10 +398,7 @@ def get_mexico_day_spanish():
     return dias[get_mexico_date().strftime('%A')]
 
 def validar_email(email):
-    if not email or pd.isna(email):
-        return True
-    pattern = r'^[\w\.-]+@[\w\.-]+\.\w+$'
-    return re.match(pattern, email) is not None
+    return True
 
 def validar_telefono(telefono):
     if not telefono or pd.isna(telefono):
