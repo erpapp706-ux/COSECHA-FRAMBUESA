@@ -3384,12 +3384,152 @@ def mostrar_formulario_asistencia_instant(id_trabajador, nombre):
             st.session_state.show_form = False
             st.session_state.scanned_worker = None
             st.rerun()
+# ==========================================
+# INTERFAZ DE GESTIÓN DE USUARIOS
+# ==========================================
 
+def mostrar_gestion_usuarios():
+    st.header("👥 Gestión de Usuarios y Permisos")
+    
+    if st.session_state.get('user_rol') != 'admin':
+        st.error("❌ No tienes permiso para acceder a esta sección")
+        return
+    
+    tab1, tab2, tab3 = st.tabs(["📋 Lista de Usuarios", "➕ Crear Usuario", "📅 Asignación por Día"])
+    
+    with tab1:
+        st.subheader("Usuarios del Sistema")
+        usuarios = get_all_users()
+        if not usuarios.empty:
+            for _, usuario in usuarios.iterrows():
+                with st.expander(f"👤 {usuario.get('nombre', 'Sin nombre')} - {usuario['email']} ({usuario.get('rol', 'supervisor')})"):
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.write(f"**ID:** {usuario['id'][:8]}...")
+                        st.write(f"**Email:** {usuario['email']}")
+                        st.write(f"**Nombre:** {usuario.get('nombre', 'No especificado')}")
+                        st.write(f"**Rol:** {usuario.get('rol', 'supervisor')}")
+                    with col2:
+                        st.write(f"**Invernaderos asignados:** {len(usuario.get('invernaderos_asignados', []))}")
+                        permisos = usuario.get('permisos', {})
+                        modulos_activos = [k for k, v in permisos.items() if v]
+                        st.write(f"**Módulos activos:** {len(modulos_activos)}")
+                    
+                    col_acc1, col_acc2, col_acc3 = st.columns(3)
+                    with col_acc1:
+                        if st.button("✏️ Editar", key=f"edit_{usuario['id']}"):
+                            st.session_state[f'editing_{usuario["id"]}'] = True
+                    with col_acc2:
+                        if st.button("🔑 Resetear Password", key=f"reset_{usuario['id']}"):
+                            st.session_state[f'reset_{usuario["id"]}'] = True
+                    with col_acc3:
+                        if usuario['email'] != st.session_state.get('user_email'):
+                            if st.button("🗑️ Eliminar", key=f"delete_{usuario['id']}"):
+                                st.session_state[f'delete_{usuario["id"]}'] = True
+                    
+                    if st.session_state.get(f'editing_{usuario["id"]}', False):
+                        with st.form(key=f"form_edit_{usuario['id']}"):
+                            nuevo_rol = st.selectbox("Rol", ["admin", "supervisor"], index=0 if usuario.get('rol') == 'admin' else 1)
+                            invernaderos = get_all_invernaderos()
+                            invernaderos_actuales = usuario.get('invernaderos_asignados', [])
+                            invernaderos_seleccionados = st.multiselect("Invernaderos", [inv[1] for inv in invernaderos], default=[inv[1] for inv in invernaderos if inv[0] in invernaderos_actuales])
+                            invernaderos_ids = [inv[0] for inv in invernaderos if inv[1] in invernaderos_seleccionados]
+                            if st.form_submit_button("💾 Guardar"):
+                                success, msg = update_user_permissions(usuario['id'], nuevo_rol, usuario.get('permisos', {}), invernaderos_ids)
+                                if success:
+                                    st.success(msg)
+                                    del st.session_state[f'editing_{usuario["id"]}']
+                                    st.rerun()
+                                else:
+                                    st.error(msg)
+                    
+                    if st.session_state.get(f'reset_{usuario["id"]}', False):
+                        with st.form(key=f"form_reset_{usuario['id']}"):
+                            new_pw = st.text_input("Nueva contraseña", type="password")
+                            if st.form_submit_button("Actualizar contraseña"):
+                                if new_pw and len(new_pw) >= 6:
+                                    success, msg = reset_user_password(usuario['id'], new_pw)
+                                    if success:
+                                        st.success(msg)
+                                        del st.session_state[f'reset_{usuario["id"]}']
+                                        st.rerun()
+                                    else:
+                                        st.error(msg)
+                                else:
+                                    st.error("Mínimo 6 caracteres")
+                    
+                    if st.session_state.get(f'delete_{usuario["id"]}', False):
+                        st.warning(f"¿Eliminar a {usuario['nombre']}?")
+                        col_yes, col_no = st.columns(2)
+                        with col_yes:
+                            if st.button("✅ Sí", key=f"confirm_del_{usuario['id']}"):
+                                success, msg = delete_user(usuario['id'], usuario['email'])
+                                if success:
+                                    st.success(msg)
+                                    del st.session_state[f'delete_{usuario["id"]}']
+                                    st.rerun()
+                                else:
+                                    st.error(msg)
+                        with col_no:
+                            if st.button("❌ No", key=f"cancel_del_{usuario['id']}"):
+                                del st.session_state[f'delete_{usuario["id"]}']
+                                st.rerun()
+        else:
+            st.info("No hay usuarios registrados")
+    
+    with tab2:
+        st.subheader("➕ Crear Nuevo Usuario")
+        with st.form("form_crear_usuario"):
+            col1, col2 = st.columns(2)
+            with col1:
+                nuevo_email = st.text_input("Email *")
+                nuevo_nombre = st.text_input("Nombre completo *")
+                nuevo_password = st.text_input("Contraseña *", type="password")
+            with col2:
+                nuevo_rol = st.selectbox("Rol *", ["supervisor", "admin"])
+                invernaderos = get_all_invernaderos()
+                invernaderos_nuevo = st.multiselect("Invernaderos asignados", [inv[1] for inv in invernaderos])
+                invernaderos_ids_nuevo = [inv[0] for inv in invernaderos if inv[1] in invernaderos_nuevo]
+            if st.form_submit_button("✅ Crear Usuario"):
+                if not nuevo_email or not nuevo_nombre or not nuevo_password:
+                    st.error("Complete todos los campos")
+                elif len(nuevo_password) < 6:
+                    st.error("La contraseña debe tener al menos 6 caracteres")
+                else:
+                    result = register_user(nuevo_email, nuevo_password, nuevo_nombre, nuevo_rol, None, invernaderos_ids_nuevo)
+                    if result['success']:
+                        st.success(result['message'])
+                        st.rerun()
+                    else:
+                        st.error(result['error'])
+    
+    with tab3:
+        st.subheader("📅 Asignación de Invernaderos por Día")
+        usuarios = get_all_users()
+        supervisores = usuarios[usuarios['rol'] == 'supervisor'] if not usuarios.empty else pd.DataFrame()
+        if not supervisores.empty:
+            supervisor = st.selectbox("Supervisor", supervisores.apply(lambda x: f"{x['id']} - {x['nombre']}", axis=1))
+            supervisor_id = supervisor.split(' - ')[0] if supervisor else None
+            fecha = st.date_input("Fecha", get_mexico_date())
+            if supervisor_id:
+                invernaderos = get_all_invernaderos()
+                seleccionados = st.multiselect("Invernaderos para este día", [inv[1] for inv in invernaderos])
+                invernaderos_ids = [inv[0] for inv in invernaderos if inv[1] in seleccionados]
+                if st.button("Asignar"):
+                    success, msg = asignar_invernaderos_dia(supervisor_id, invernaderos_ids, fecha, st.session_state.get('user_id'))
+                    if success:
+                        st.success(msg)
+                        st.rerun()
+                    else:
+                        st.error(msg)
+        else:
+            st.info("No hay supervisores registrados")
 # ==========================================
 # FUNCIÓN PRINCIPAL
 # ==========================================
 
 def main():
+  def main():
     global supabase
     supabase = init_supabase()
     if supabase is None:
