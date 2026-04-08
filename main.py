@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime, date, timedelta
+import sqlite3
+from datetime import datetime, timedelta
 from io import BytesIO
 import re
 import qrcode
@@ -9,377 +10,332 @@ import os
 import json
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
+from reportlab.lib.utils import ImageReader
 import plotly.express as px
 import plotly.graph_objects as go
-import cv2
-import numpy as np
-from pyzbar.pyzbar import decode
-import time
-import io
-import zipfile
-from supabase import create_client, Client
-from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode
-import av
-from queue import Queue
-from supabase.lib.client_options import ClientOptions
-from functools import wraps
-from dateutil import tz
-
-# ==========================================
-# CONFIGURACIÓN DE ZONA HORARIA MÉXICO
-# ==========================================
-MEXICO_TZ = tz.gettz('America/Mexico_City')
-
-def get_mexico_time():
-    return datetime.now(MEXICO_TZ)
-
-def get_mexico_date():
-    return get_mexico_time().date()
-
-def get_mexico_datetime():
-    return get_mexico_time()
-
-# ==========================================
-# CONEXIÓN A SUPABASE
-# ==========================================
-
-@st.cache_resource
-def init_supabase() -> Client:
-    try:
-        url = st.secrets["SUPABASE_URL"]
-        key = st.secrets["SUPABASE_KEY"]
-        return create_client(url, key)
-    except:
-        try:
-            url = os.getenv("SUPABASE_URL", "https://tu-proyecto.supabase.co")
-            key = os.getenv("SUPABASE_KEY", "tu-anon-key")
-            return create_client(url, key)
-        except Exception as e:
-            st.error(f"❌ Error de conexión: {str(e)}")
-            return None
-
-supabase = init_supabase()
+from plotly.subplots import make_subplots
 
 # ==========================================
 # CONFIGURACIÓN INICIAL
 # ==========================================
 
 st.set_page_config(
-    page_title="Sistema Integral de Gestión Agrícola",
+    page_title="Sistema Integral de Gestión",
     page_icon="🌾",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
+# Estilo personalizado para el sidebar
 st.markdown("""
     <style>
-    .stButton > button { width: 100%; border-radius: 10px; padding: 12px; font-weight: bold; margin-bottom: 8px; }
-    .stButton > button:hover { transform: translateX(5px); box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
-    .sidebar-title { text-align: center; padding: 20px 0; border-bottom: 2px solid #e0e0e0; margin-bottom: 20px; }
-    .sidebar-title h2 { color: #2c3e50; margin: 0; }
-    .user-info { padding: 10px; background: #f0f2f6; border-radius: 10px; margin-bottom: 20px; text-align: center; }
-    .kpi-card { background: linear-gradient(135deg, #1e3c2c 0%, #2a6b3c 100%); border-radius: 15px; padding: 15px; color: white; text-align: center; margin-bottom: 15px; }
-    .kpi-value { font-size: 28px; font-weight: bold; }
-    .kpi-label { font-size: 12px; opacity: 0.9; margin-top: 5px; }
-    .section-title { font-size: 24px; font-weight: bold; color: #1e3c2c; margin: 20px 0 15px 0; border-left: 4px solid #2a6b3c; padding-left: 15px; }
-    .date-card { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 12px; padding: 12px; text-align: center; }
-    .time-card { background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); border-radius: 12px; padding: 12px; text-align: center; }
-    .week-card { background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%); border-radius: 12px; padding: 12px; text-align: center; }
-    .login-container { max-width: 400px; margin: 100px auto; padding: 30px; background: white; border-radius: 15px; box-shadow: 0 4px 20px rgba(0,0,0,0.1); }
+    .stButton > button {
+        width: 100%;
+        border-radius: 10px;
+        padding: 12px;
+        font-weight: bold;
+        transition: all 0.3s;
+        margin-bottom: 8px;
+    }
+    .stButton > button:hover {
+        transform: translateX(5px);
+        box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+    }
+    .sidebar-title {
+        text-align: center;
+        padding: 20px 0;
+        border-bottom: 2px solid #e0e0e0;
+        margin-bottom: 20px;
+    }
+    .sidebar-title h2 {
+        color: #2c3e50;
+        margin: 0;
+    }
+    .sidebar-title p {
+        color: #7f8c8d;
+        font-size: 12px;
+        margin: 5px 0 0 0;
+    }
     </style>
 """, unsafe_allow_html=True)
 
-REPORTE_TURNOS = ["Reporte 10:00am", "Reporte 12:00pm", "Reporte 02:00pm", "Reporte 03:00pm", "Reporte 04:00pm", "Reporte 05:00pm", "Reporte 06:00pm", "Reporte 07:00pm", "Reporte 08:00pm"]
-
 # ==========================================
-# FUNCIONES DE AUTENTICACIÓN
+# CONFIGURACIÓN BASE DE DATOS LOCAL
 # ==========================================
 
-def obtener_permisos_usuario(user_id):
+DB_PATH = "sistema_gestion.db"
+
+def migrar_base_datos():
+    """Función para migrar la base de datos existente agregando columnas faltantes"""
     try:
-        result = supabase.table('perfiles_usuario').select('permisos, rol, invernaderos_asignados').eq('id', user_id).execute()
-        if result.data:
-            return result.data[0].get('permisos', {}), result.data[0].get('rol'), result.data[0].get('invernaderos_asignados', [])
-    except:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        # 1. Verificar y agregar columna tipo_evento a registros_asistencia
+        try:
+            cursor.execute("PRAGMA table_info(registros_asistencia)")
+            columns = cursor.fetchall()
+            column_names = [col[1] for col in columns]
+            
+            if 'tipo_evento' not in column_names:
+                cursor.execute("ALTER TABLE registros_asistencia ADD COLUMN tipo_evento TEXT")
+                cursor.execute("UPDATE registros_asistencia SET tipo_evento = 'entrada_invernadero' WHERE tipo_evento IS NULL")
+        except Exception:
+            pass
+        
+        # 2. Verificar y agregar columnas a envios_enfriado
+        try:
+            cursor.execute("PRAGMA table_info(envios_enfriado)")
+            columns = cursor.fetchall()
+            column_names = [col[1] for col in columns]
+            
+            if 'tipo_envio' not in column_names:
+                cursor.execute("ALTER TABLE envios_enfriado ADD COLUMN tipo_envio TEXT DEFAULT 'Nacional'")
+            
+            if 'hora' not in column_names:
+                cursor.execute("ALTER TABLE envios_enfriado ADD COLUMN hora TIME")
+            
+            if 'presentacion' not in column_names:
+                cursor.execute("ALTER TABLE envios_enfriado ADD COLUMN presentacion TEXT DEFAULT '6 oz'")
+            
+            if 'lote' not in column_names:
+                cursor.execute("ALTER TABLE envios_enfriado ADD COLUMN lote TEXT")
+            
+            if 'trabajador_envia_id' not in column_names:
+                cursor.execute("ALTER TABLE envios_enfriado ADD COLUMN trabajador_envia_id INTEGER")
+                cursor.execute("UPDATE envios_enfriado SET trabajador_envia_id = trabajador_id WHERE trabajador_envia_id IS NULL")
+            
+            if 'trabajador_recibe_id' not in column_names:
+                cursor.execute("ALTER TABLE envios_enfriado ADD COLUMN trabajador_recibe_id INTEGER")
+                cursor.execute("UPDATE envios_enfriado SET trabajador_recibe_id = trabajador_id WHERE trabajador_recibe_id IS NULL")
+                
+        except Exception:
+            pass
+        
+        # 3. Verificar y agregar columna cajas_enviadas a cosechas
+        try:
+            cursor.execute("PRAGMA table_info(cosechas)")
+            columns = cursor.fetchall()
+            column_names = [col[1] for col in columns]
+            
+            if 'cajas_enviadas' not in column_names:
+                cursor.execute("ALTER TABLE cosechas ADD COLUMN cajas_enviadas REAL DEFAULT 0")
+        except Exception:
+            pass
+        
+        conn.commit()
+        conn.close()
+    except Exception:
         pass
-    return {}, 'supervisor', []
 
-def get_configuracion_sistema(clave):
+def init_database():
+    """Inicializa la base de datos SQLite con todas las tablas necesarias"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    # Tabla de departamentos
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS departamentos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nombre TEXT UNIQUE NOT NULL
+        )
+    ''')
+    
+    # Tabla de subdepartamentos
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS subdepartamentos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nombre TEXT UNIQUE NOT NULL
+        )
+    ''')
+    
+    # Tabla de puestos
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS puestos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nombre TEXT UNIQUE NOT NULL
+        )
+    ''')
+    
+    # Tabla de trabajadores
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS trabajadores (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            apellido_paterno TEXT NOT NULL,
+            apellido_materno TEXT,
+            nombre TEXT NOT NULL,
+            correo TEXT,
+            telefono TEXT,
+            fecha_alta DATE NOT NULL,
+            fecha_baja DATE,
+            estatus TEXT DEFAULT 'activo',
+            departamento_id INTEGER,
+            subdepartamento_id INTEGER,
+            tipo_nomina TEXT,
+            puesto_id INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (departamento_id) REFERENCES departamentos(id),
+            FOREIGN KEY (subdepartamento_id) REFERENCES subdepartamentos(id),
+            FOREIGN KEY (puesto_id) REFERENCES puestos(id)
+        )
+    ''')
+    
+    # Tabla de cosechas
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS cosechas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fecha DATE NOT NULL,
+            dia TEXT NOT NULL,
+            semana INTEGER NOT NULL,
+            trabajador_id INTEGER,
+            modulo INTEGER NOT NULL,
+            tipo_cosecha TEXT NOT NULL,
+            calidad TEXT,
+            presentacion TEXT NOT NULL,
+            cantidad_clams REAL NOT NULL,
+            numero_cajas REAL NOT NULL,
+            cajas_enviadas REAL DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (trabajador_id) REFERENCES trabajadores(id)
+        )
+    ''')
+    
+    # Tabla de invernaderos
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS invernaderos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nombre TEXT UNIQUE NOT NULL,
+            ubicacion TEXT,
+            activo BOOLEAN DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    # Tabla de control de asistencia
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS asistencia (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trabajador_id INTEGER NOT NULL,
+            invernadero_id INTEGER,
+            fecha DATE NOT NULL,
+            hora_entrada TIME,
+            hora_salida TIME,
+            hora_entrada_comida TIME,
+            hora_salida_comida TIME,
+            tipo_movimiento TEXT,
+            estado TEXT DEFAULT 'activo',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (trabajador_id) REFERENCES trabajadores(id),
+            FOREIGN KEY (invernadero_id) REFERENCES invernaderos(id)
+        )
+    ''')
+    
+    # Tabla de registros detallados
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS registros_asistencia (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trabajador_id INTEGER NOT NULL,
+            invernadero_id INTEGER,
+            fecha DATE NOT NULL,
+            hora TIME NOT NULL,
+            tipo_evento TEXT NOT NULL,
+            observaciones TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (trabajador_id) REFERENCES trabajadores(id),
+            FOREIGN KEY (invernadero_id) REFERENCES invernaderos(id)
+        )
+    ''')
+    
+    # Tabla de descansos
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS descansos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trabajador_id INTEGER NOT NULL,
+            fecha DATE NOT NULL,
+            tipo_descanso TEXT NOT NULL,
+            observaciones TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (trabajador_id) REFERENCES trabajadores(id),
+            UNIQUE(trabajador_id, fecha)
+        )
+    ''')
+    
+    # Tabla de envíos a enfriado - VERSIÓN CORREGIDA
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS envios_enfriado (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fecha DATE NOT NULL,
+            hora TIME,
+            invernadero_id INTEGER NOT NULL,
+            trabajador_envia_id INTEGER,
+            trabajador_recibe_id INTEGER,
+            trabajador_id INTEGER,
+            tipo_envio TEXT DEFAULT 'Nacional',
+            presentacion TEXT DEFAULT '6 oz',
+            cantidad_cajas REAL NOT NULL,
+            lote TEXT,
+            observaciones TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (invernadero_id) REFERENCES invernaderos(id),
+            FOREIGN KEY (trabajador_envia_id) REFERENCES trabajadores(id),
+            FOREIGN KEY (trabajador_recibe_id) REFERENCES trabajadores(id),
+            FOREIGN KEY (trabajador_id) REFERENCES trabajadores(id)
+        )
+    ''')
+    
+    # Insertar datos de ejemplo
+    cursor.execute("SELECT COUNT(*) FROM departamentos")
+    if cursor.fetchone()[0] == 0:
+        cursor.executemany("INSERT INTO departamentos (nombre) VALUES (?)", 
+                          [("Producción",), ("Empaque",), ("Calidad",), ("Logística",)])
+    
+    cursor.execute("SELECT COUNT(*) FROM subdepartamentos")
+    if cursor.fetchone()[0] == 0:
+        cursor.executemany("INSERT INTO subdepartamentos (nombre) VALUES (?)",
+                          [("Cosecha",), ("Postcosecha",), ("Control Calidad",), ("Almacén",)])
+    
+    cursor.execute("SELECT COUNT(*) FROM puestos")
+    if cursor.fetchone()[0] == 0:
+        cursor.executemany("INSERT INTO puestos (nombre) VALUES (?)",
+                          [("Operario",), ("Supervisor",), ("Jefe de Cuadrilla",), 
+                           ("Técnico",), ("Control de Calidad",)])
+    
+    cursor.execute("SELECT COUNT(*) FROM invernaderos")
+    if cursor.fetchone()[0] == 0:
+        cursor.executemany("INSERT INTO invernaderos (nombre, ubicacion) VALUES (?, ?)",
+                          [("Invernadero Norte", "Zona Norte"), ("Invernadero Sur", "Zona Sur"),
+                           ("Invernadero Este", "Zona Este"), ("Invernadero Oeste", "Zona Oeste"),
+                           ("Invernadero Central", "Zona Central")])
+    
+    # Crear índices
     try:
-        result = supabase.table('configuracion_sistema').select('valor').eq('clave', clave).execute()
-        if result.data:
-            return result.data[0]['valor'] == 'true'
-    except:
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_cosechas_fecha ON cosechas(fecha)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_trabajadores_estatus ON trabajadores(estatus)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_asistencia_fecha ON asistencia(fecha)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_registros_fecha ON registros_asistencia(fecha)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_envios_fecha ON envios_enfriado(fecha)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_descansos_fecha ON descansos(fecha)")
+        
+        cursor.execute("PRAGMA table_info(registros_asistencia)")
+        columns = cursor.fetchall()
+        column_names = [col[1] for col in columns]
+        if 'tipo_evento' in column_names:
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_registros_tipo ON registros_asistencia(tipo_evento)")
+    except Exception:
         pass
-    return True
+    
+    conn.commit()
+    conn.close()
 
-def login_user(email, password):
-    try:
-        response = supabase.auth.sign_in_with_password({"email": email, "password": password})
-        if response.user:
-            perfil = supabase.table('perfiles_usuario').select('*').eq('id', response.user.id).execute()
-            rol = 'supervisor'
-            nombre = email.split('@')[0]
-            permisos = {}
-            invernaderos_asignados = []
-            if perfil.data and len(perfil.data) > 0:
-                rol = perfil.data[0].get('rol', 'supervisor')
-                nombre = perfil.data[0].get('nombre', nombre)
-                permisos = perfil.data[0].get('permisos', {})
-                invernaderos_asignados = perfil.data[0].get('invernaderos_asignados', [])
-            return {'success': True, 'user_id': response.user.id, 'email': email, 'rol': rol, 'nombre': nombre, 'permisos': permisos, 'invernaderos_asignados': invernaderos_asignados}
-    except Exception as e:
-        return {'success': False, 'error': str(e)}
-    return {'success': False, 'error': 'Error de autenticación'}
-
-def register_user(email, password, nombre, rol='supervisor', permisos=None, invernaderos_asignados=None):
-    try:
-        response = supabase.auth.sign_up({"email": email, "password": password, "options": {"data": {"nombre": nombre}}})
-        if response.user:
-            permisos_default = {
-                "registro_cosecha": True, "dashboard": True, "proyecciones": True, "control_asistencia": True,
-                "avance_cosecha": True, "traslado_camara_fria": True, "gestion_merma": True, "cajas_mesa": True,
-                "registros_qr": True, "reportes": True, "gestion_invernaderos": False, "gestion_personal": False,
-                "gestion_usuarios": False, "generar_qr": False, "catalogos": False, "cierre_dia": False
-            }
-            if permisos:
-                permisos_default.update(permisos)
-            supabase.table('perfiles_usuario').insert({
-                'id': response.user.id, 'email': email, 'nombre': nombre, 'rol': rol,
-                'permisos': permisos_default, 'invernaderos_asignados': invernaderos_asignados or []
-            }).execute()
-            return {'success': True, 'message': 'Usuario registrado exitosamente'}
-    except Exception as e:
-        return {'success': False, 'error': str(e)}
-    return {'success': False, 'error': 'Error al registrar usuario'}
-
-def logout_user():
-    try:
-        supabase.auth.sign_out()
-    except:
-        pass
-    for key in ['user_id', 'user_email', 'user_rol', 'user_nombre', 'authenticated', 'user_permisos', 'user_invernaderos']:
-        if key in st.session_state:
-            del st.session_state[key]
-    st.rerun()
-
-def show_login_page():
-    st.markdown('<div style="text-align: center; padding: 40px 0;"><h1>🌾 Sistema Integral de Gestión Agrícola</h1><p>Acceda con sus credenciales</p></div>', unsafe_allow_html=True)
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        with st.container():
-            st.markdown('<div class="login-container">', unsafe_allow_html=True)
-            tab1, tab2 = st.tabs(["🔐 Iniciar Sesión", "📝 Registrarse"])
-            with tab1:
-                email = st.text_input("Email", key="login_email")
-                password = st.text_input("Contraseña", type="password", key="login_password")
-                if st.button("Ingresar", type="primary", use_container_width=True):
-                    if email and password:
-                        result = login_user(email, password)
-                        if result['success']:
-                            st.session_state.authenticated = True
-                            st.session_state.user_id = result['user_id']
-                            st.session_state.user_email = result['email']
-                            st.session_state.user_rol = result['rol']
-                            st.session_state.user_nombre = result['nombre']
-                            st.session_state.user_permisos = result.get('permisos', {})
-                            st.session_state.user_invernaderos = result.get('invernaderos_asignados', [])
-                            st.success(f"✅ Bienvenido {result['nombre']}")
-                            st.rerun()
-                        else:
-                            st.error(result['error'])
-                    else:
-                        st.error("Ingrese email y contraseña")
-            with tab2:
-                reg_email = st.text_input("Email", key="reg_email")
-                reg_password = st.text_input("Contraseña", type="password", key="reg_password")
-                reg_confirm = st.text_input("Confirmar Contraseña", type="password", key="reg_confirm")
-                reg_nombre = st.text_input("Nombre completo", key="reg_nombre")
-                reg_rol = st.selectbox("Rol", ["supervisor", "admin"], key="reg_rol")
-                if st.button("Registrarse", type="primary", use_container_width=True):
-                    if reg_email and reg_password and reg_nombre:
-                        if reg_password != reg_confirm:
-                            st.error("Las contraseñas no coinciden")
-                        elif len(reg_password) < 6:
-                            st.error("La contraseña debe tener al menos 6 caracteres")
-                        else:
-                            result = register_user(reg_email, reg_password, reg_nombre, reg_rol)
-                            if result['success']:
-                                st.success(result['message'])
-                                st.info("Ahora puedes iniciar sesión")
-                            else:
-                                st.error(result['error'])
-                    else:
-                        st.error("Complete todos los campos")
-            st.markdown('</div>', unsafe_allow_html=True)
+# Inicializar y migrar base de datos
+init_database()
+migrar_base_datos()
 
 # ==========================================
-# FUNCIONES DE PERMISOS Y ASIGNACIONES (NUEVO)
+# FUNCIONES DE VALIDACIÓN
 # ==========================================
-
-def get_permisos_modulos(usuario_id):
-    """Obtiene los permisos de módulos para un usuario"""
-    try:
-        result = supabase.table('perfiles_usuario').select('permisos').eq('id', usuario_id).execute()
-        if result.data:
-            return result.data[0].get('permisos', {})
-    except:
-        pass
-    return {}
-
-def usuario_puede_ver_modulo(usuario_id, modulo):
-    """Verifica si un usuario puede ver un módulo específico"""
-    if st.session_state.get('user_rol') == 'admin':
-        return True
-    
-    permisos = get_permisos_modulos(usuario_id)
-    return permisos.get(modulo, False)
-
-def get_modulos_visibles(usuario_id):
-    """Obtiene la lista de módulos que el usuario puede ver"""
-    todos_modulos = {
-        "registro_cosecha": "🌾 Registro Cosecha",
-        "dashboard": "📊 Dashboard",
-        "proyecciones": "📈 Proyecciones",
-        "control_asistencia": "🕐 Control Asistencia",
-        "avance_cosecha": "📊 Avance Cosecha",
-        "traslado_camara_fria": "❄️ Traslado a Cámara Fría",
-        "gestion_merma": "🗑️ Gestión Merma",
-        "cajas_mesa": "📦 Cajas en Mesa",
-        "registros_qr": "📊 Registros QR",
-        "reportes": "📋 Reportes",
-        "gestion_invernaderos": "🏭 Gestión Invernaderos",
-        "gestion_personal": "👥 Gestión Personal",
-        "gestion_usuarios": "👥 Gestión Usuarios",
-        "generar_qr": "📱 Generar QR",
-        "catalogos": "📚 Catálogos",
-        "cierre_dia": "🔒 Cierre de Día"
-    }
-    
-    if st.session_state.get('user_rol') == 'admin':
-        return todos_modulos
-    
-    permisos = get_permisos_modulos(usuario_id)
-    modulos_visibles = {}
-    for key, name in todos_modulos.items():
-        if permisos.get(key, False):
-            modulos_visibles[key] = name
-    
-    return modulos_visibles
-
-def get_invernaderos_asignados_dia(usuario_id, fecha=None):
-    """Obtiene los invernaderos asignados a un usuario para una fecha específica"""
-    if not fecha:
-        fecha = get_mexico_date()
-    
-    if st.session_state.get('user_rol') == 'admin':
-        return get_all_invernaderos()
-    
-    try:
-        # Verificar asignaciones específicas del día
-        result = supabase.table('asignaciones_invernaderos_dia').select('invernadero_id, invernaderos:invernadero_id(nombre, ubicacion, lineas_totales)').eq('usuario_id', usuario_id).eq('fecha', fecha.isoformat()).execute()
-        
-        if result.data:
-            return [(row['invernadero_id'], row['invernaderos']['nombre'], row['invernaderos']['ubicacion'], row['invernaderos'].get('lineas_totales', 40)) for row in result.data]
-        
-        # Si no hay asignaciones específicas, usar las generales
-        perfil = supabase.table('perfiles_usuario').select('invernaderos_asignados').eq('id', usuario_id).execute()
-        if perfil.data and perfil.data[0].get('invernaderos_asignados'):
-            invernaderos_ids = perfil.data[0]['invernaderos_asignados']
-            result = supabase.table('invernaderos').select('id, nombre, ubicacion, lineas_totales').in_('id', invernaderos_ids).eq('activo', True).execute()
-            return [(row['id'], row['nombre'], row['ubicacion'], row.get('lineas_totales', 40)) for row in result.data] if result.data else []
-        
-        return []
-    except Exception as e:
-        return []
-
-def asignar_invernaderos_dia(usuario_id, invernaderos_ids, fecha, asignado_por):
-    """Asigna invernaderos específicos para un día"""
-    try:
-        # Eliminar asignaciones existentes para esa fecha
-        supabase.table('asignaciones_invernaderos_dia').delete().eq('usuario_id', usuario_id).eq('fecha', fecha.isoformat()).execute()
-        
-        # Insertar nuevas asignaciones
-        for inv_id in invernaderos_ids:
-            supabase.table('asignaciones_invernaderos_dia').insert({
-                'usuario_id': usuario_id,
-                'invernadero_id': inv_id,
-                'fecha': fecha.isoformat(),
-                'asignado_por': asignado_por
-            }).execute()
-        
-        invalidar_cache()
-        return True, f"✅ Asignación actualizada para {fecha}"
-    except Exception as e:
-        return False, f"❌ Error: {str(e)}"
-
-def verificar_acceso_invernadero(usuario_id, invernadero_id, fecha=None):
-    """Verifica si el usuario tiene acceso a un invernadero en una fecha específica"""
-    if not fecha:
-        fecha = get_mexico_date()
-    
-    if st.session_state.get('user_rol') == 'admin':
-        return True
-    
-    try:
-        # Verificar asignación específica del día
-        result = supabase.table('asignaciones_invernaderos_dia').select('id').eq('usuario_id', usuario_id).eq('invernadero_id', invernadero_id).eq('fecha', fecha.isoformat()).execute()
-        if result.data:
-            return True
-        
-        # Verificar asignaciones generales
-        perfil = supabase.table('perfiles_usuario').select('invernaderos_asignados').eq('id', usuario_id).execute()
-        if perfil.data and perfil.data[0].get('invernaderos_asignados'):
-            return invernadero_id in perfil.data[0]['invernaderos_asignados']
-        
-        return False
-    except:
-        return False
-
-def get_asignaciones_por_dia(usuario_id, fecha_inicio=None, fecha_fin=None):
-    """Obtiene el historial de asignaciones por día"""
-    try:
-        query = supabase.table('asignaciones_invernaderos_dia').select('*, invernaderos:invernadero_id(nombre), perfiles_usuario!asignado_por(nombre)').eq('usuario_id', usuario_id)
-        
-        if fecha_inicio:
-            query = query.gte('fecha', fecha_inicio.isoformat())
-        if fecha_fin:
-            query = query.lte('fecha', fecha_fin.isoformat())
-        
-        result = query.order('fecha', desc=True).execute()
-        
-        data = []
-        for row in result.data:
-            data.append({
-                'fecha': row['fecha'],
-                'invernadero': row['invernaderos']['nombre'] if row['invernaderos'] else 'N/A',
-                'asignado_por': row['perfiles_usuario']['nombre'] if row['perfiles_usuario'] else 'Sistema'
-            })
-        
-        return pd.DataFrame(data)
-    except:
-        return pd.DataFrame()
-
-# ==========================================
-# FUNCIONES DE UTILIDAD
-# ==========================================
-
-def invalidar_cache():
-    st.cache_data.clear()
-
-def export_to_excel(df, sheet_name="Datos"):
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name=sheet_name)
-    output.seek(0)
-    return output
-
-def get_mexico_week():
-    return get_mexico_date().isocalendar()[1]
-
-def get_mexico_day_spanish():
-    dias = {'Monday': 'Lunes', 'Tuesday': 'Martes', 'Wednesday': 'Miércoles', 'Thursday': 'Jueves', 'Friday': 'Viernes', 'Saturday': 'Sábado', 'Sunday': 'Domingo'}
-    return dias[get_mexico_date().strftime('%A')]
 
 def validar_email(email):
     if not email or pd.isna(email):
@@ -397,25 +353,22 @@ def validar_telefono(telefono):
 # ==========================================
 
 def get_departamentos():
-    try:
-        result = supabase.table('departamentos').select('id, nombre').order('nombre').execute()
-        return [(row['id'], row['nombre']) for row in result.data]
-    except:
-        return []
+    conn = sqlite3.connect(DB_PATH)
+    df = pd.read_sql_query("SELECT id, nombre FROM departamentos ORDER BY nombre", conn)
+    conn.close()
+    return [(row['id'], row['nombre']) for _, row in df.iterrows()]
 
 def get_subdepartamentos():
-    try:
-        result = supabase.table('subdepartamentos').select('id, nombre').order('nombre').execute()
-        return [(row['id'], row['nombre']) for row in result.data]
-    except:
-        return []
+    conn = sqlite3.connect(DB_PATH)
+    df = pd.read_sql_query("SELECT id, nombre FROM subdepartamentos ORDER BY nombre", conn)
+    conn.close()
+    return [(row['id'], row['nombre']) for _, row in df.iterrows()]
 
 def get_puestos():
-    try:
-        result = supabase.table('puestos').select('id, nombre').order('nombre').execute()
-        return [(row['id'], row['nombre']) for row in result.data]
-    except:
-        return []
+    conn = sqlite3.connect(DB_PATH)
+    df = pd.read_sql_query("SELECT id, nombre FROM puestos ORDER BY nombre", conn)
+    conn.close()
+    return [(row['id'], row['nombre']) for _, row in df.iterrows()]
 
 def get_departamentos_nombres():
     return [nombre for _, nombre in get_departamentos()]
@@ -426,52 +379,55 @@ def get_subdepartamentos_nombres():
 def get_puestos_nombres():
     return [nombre for _, nombre in get_puestos()]
 
-def get_all_invernaderos():
-    try:
-        result = supabase.table('invernaderos').select('id, nombre, ubicacion, lineas_totales').eq('activo', True).order('nombre').execute()
-        return [(row['id'], row['nombre'], row['ubicacion'], row.get('lineas_totales', 40)) for row in result.data]
-    except:
-        return []
-
-def get_invernaderos_usuario():
-    """Obtiene invernaderos según asignaciones del día"""
-    usuario_id = st.session_state.get('user_id')
-    fecha_actual = get_mexico_date()
-    return get_invernaderos_asignados_dia(usuario_id, fecha_actual)
-
-def get_invernaderos():
-    return get_all_invernaderos()
-
 def add_catalog_item(tabla, nombre):
     try:
-        supabase.table(tabla).insert({'nombre': nombre.lower().strip()}).execute()
-        invalidar_cache()
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(f"INSERT INTO {tabla} (nombre) VALUES (?)", (nombre.lower().strip(),))
+        conn.commit()
+        conn.close()
         return True, "✅ Item agregado correctamente"
+    except sqlite3.IntegrityError:
+        return False, "❌ Este nombre ya existe"
     except Exception as e:
-        if 'duplicate key' in str(e).lower():
-            return False, "❌ Este nombre ya existe"
         return False, f"❌ Error: {str(e)}"
 
 def update_catalog_item(tabla, item_id, nuevo_nombre):
     try:
-        supabase.table(tabla).update({'nombre': nuevo_nombre.lower().strip()}).eq('id', item_id).execute()
-        invalidar_cache()
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(f"UPDATE {tabla} SET nombre = ? WHERE id = ?", (nuevo_nombre.lower().strip(), item_id))
+        conn.commit()
+        conn.close()
         return True, "✅ Item actualizado correctamente"
     except Exception as e:
         return False, f"❌ Error: {str(e)}"
 
 def delete_catalog_item(tabla, item_id):
     try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        cursor.execute(f"SELECT id FROM {tabla} WHERE id = ?", (item_id,))
+        if not cursor.fetchone():
+            conn.close()
+            return False, f"❌ El item no existe"
+        
         if tabla == "departamentos":
-            check = supabase.table('trabajadores').select('id', count='exact').eq('departamento_id', item_id).execute()
+            cursor.execute("SELECT COUNT(*) FROM trabajadores WHERE departamento_id = ?", (item_id,))
         elif tabla == "subdepartamentos":
-            check = supabase.table('trabajadores').select('id', count='exact').eq('subdepartamento_id', item_id).execute()
+            cursor.execute("SELECT COUNT(*) FROM trabajadores WHERE subdepartamento_id = ?", (item_id,))
         else:
-            check = supabase.table('trabajadores').select('id', count='exact').eq('puesto_id', item_id).execute()
-        if check.count and check.count > 0:
-            return False, f"❌ No se puede eliminar: {check.count} trabajadores lo están usando"
-        supabase.table(tabla).delete().eq('id', item_id).execute()
-        invalidar_cache()
+            cursor.execute("SELECT COUNT(*) FROM trabajadores WHERE puesto_id = ?", (item_id,))
+        
+        count = cursor.fetchone()[0]
+        if count > 0:
+            conn.close()
+            return False, f"❌ No se puede eliminar: {count} trabajadores lo están usando"
+        
+        cursor.execute(f"DELETE FROM {tabla} WHERE id = ?", (item_id,))
+        conn.commit()
+        conn.close()
         return True, "✅ Item eliminado correctamente"
     except Exception as e:
         return False, f"❌ Error: {str(e)}"
@@ -481,787 +437,235 @@ def delete_catalog_item(tabla, item_id):
 # ==========================================
 
 def get_id_by_nombre(tabla, nombre):
-    try:
-        result = supabase.table(tabla).select('id').eq('nombre', nombre).execute()
-        if result.data:
-            return result.data[0]['id']
-        return None
-    except:
-        return None
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(f"SELECT id FROM {tabla} WHERE nombre = ?", (nombre,))
+    result = cursor.fetchone()
+    conn.close()
+    return result[0] if result else None
 
 def get_all_workers():
+    conn = sqlite3.connect(DB_PATH)
     try:
-        result = supabase.table('trabajadores').select("""
-            id, nombre, apellido_paterno, apellido_materno, correo, telefono, estatus, fecha_alta, fecha_baja, tipo_nomina,
-            departamentos:departamento_id (nombre), subdepartamentos:subdepartamento_id (nombre), puestos:puesto_id (nombre)
-        """).eq('estatus', 'activo').order('apellido_paterno').execute()
-        data = []
-        for row in result.data:
-            data.append({
-                'id': row['id'], 'nombre': row['nombre'], 'apellido_paterno': row['apellido_paterno'],
-                'apellido_materno': row['apellido_materno'] or '', 'correo': row['correo'] or '', 'telefono': row['telefono'] or '',
-                'estatus': row['estatus'], 'fecha_alta': row['fecha_alta'], 'fecha_baja': row['fecha_baja'],
-                'departamento': row['departamentos']['nombre'] if row['departamentos'] else 'Sin asignar',
-                'subdepartamento': row['subdepartamentos']['nombre'] if row['subdepartamentos'] else 'Sin asignar',
-                'puesto': row['puestos']['nombre'] if row['puestos'] else 'Sin asignar', 'tipo_nomina': row['tipo_nomina']
-            })
-        return pd.DataFrame(data)
+        query = """
+            SELECT t.id, t.nombre, t.apellido_paterno, t.apellido_materno,
+                   t.correo, t.telefono, t.estatus, t.fecha_alta, t.fecha_baja,
+                   COALESCE(d.nombre, 'Sin asignar') as departamento, 
+                   COALESCE(s.nombre, 'Sin asignar') as subdepartamento,
+                   COALESCE(p.nombre, 'Sin asignar') as puesto, 
+                   t.tipo_nomina
+            FROM trabajadores t
+            LEFT JOIN departamentos d ON t.departamento_id = d.id
+            LEFT JOIN subdepartamentos s ON t.subdepartamento_id = s.id
+            LEFT JOIN puestos p ON t.puesto_id = p.id
+            ORDER BY t.apellido_paterno, t.nombre
+        """
+        df = pd.read_sql_query(query, conn)
+        return df
     except Exception as e:
+        st.error(f"Error al obtener trabajadores: {str(e)}")
         return pd.DataFrame()
+    finally:
+        conn.close()
 
 def get_worker_by_id(worker_id):
+    conn = sqlite3.connect(DB_PATH)
     try:
-        result = supabase.table('trabajadores').select("""
-            *, departamentos:departamento_id (nombre), subdepartamentos:subdepartamento_id (nombre), puestos:puesto_id (nombre)
-        """).eq('id', worker_id).execute()
-        if result.data:
-            row = result.data[0]
-            return {
-                'id': row['id'], 'nombre': row['nombre'], 'apellido_paterno': row['apellido_paterno'],
-                'apellido_materno': row['apellido_materno'] or '', 'correo': row['correo'], 'telefono': row['telefono'],
-                'estatus': row['estatus'], 'fecha_alta': row['fecha_alta'], 'fecha_baja': row['fecha_baja'],
-                'departamento_id': row['departamento_id'], 'subdepartamento_id': row['subdepartamento_id'],
-                'puesto_id': row['puesto_id'], 'tipo_nomina': row['tipo_nomina'],
-                'departamento_nombre': row['departamentos']['nombre'] if row['departamentos'] else '',
-                'subdepartamento_nombre': row['subdepartamentos']['nombre'] if row['subdepartamentos'] else '',
-                'puesto_nombre': row['puestos']['nombre'] if row['puestos'] else ''
-            }
+        query = """
+            SELECT t.*, 
+                   COALESCE(d.nombre, '') as departamento_nombre,
+                   COALESCE(s.nombre, '') as subdepartamento_nombre,
+                   COALESCE(p.nombre, '') as puesto_nombre
+            FROM trabajadores t
+            LEFT JOIN departamentos d ON t.departamento_id = d.id
+            LEFT JOIN subdepartamentos s ON t.subdepartamento_id = s.id
+            LEFT JOIN puestos p ON t.puesto_id = p.id
+            WHERE t.id = ?
+        """
+        df = pd.read_sql_query(query, conn, params=(worker_id,))
+        if not df.empty:
+            return df.iloc[0].to_dict()
         return None
-    except:
+    except Exception as e:
+        st.error(f"Error al obtener trabajador: {str(e)}")
         return None
+    finally:
+        conn.close()
 
 def add_worker(data):
     try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
         depto_id = get_id_by_nombre("departamentos", data['departamento'])
         sub_id = get_id_by_nombre("subdepartamentos", data['subdepartamento'])
         puesto_id = get_id_by_nombre("puestos", data['puesto'])
-        supabase.table('trabajadores').insert({
-            'apellido_paterno': data['ap'], 'apellido_materno': data['am'], 'nombre': data['nom'],
-            'correo': data['cor'], 'telefono': data['tel'], 'fecha_alta': data['fa'], 'estatus': 'activo',
-            'departamento_id': depto_id, 'subdepartamento_id': sub_id, 'tipo_nomina': data['tn'], 'puesto_id': puesto_id
-        }).execute()
-        invalidar_cache()
+        
+        cursor.execute("""
+            INSERT INTO trabajadores
+            (apellido_paterno, apellido_materno, nombre, correo, telefono,
+             fecha_alta, estatus, departamento_id, subdepartamento_id,
+             tipo_nomina, puesto_id)
+            VALUES (?, ?, ?, ?, ?, ?, 'activo', ?, ?, ?, ?)
+        """, (data['ap'], data['am'], data['nom'], data['cor'], data['tel'],
+              data['fa'], depto_id, sub_id, data['tn'], puesto_id))
+        
+        conn.commit()
+        conn.close()
         return True, "✅ Trabajador guardado correctamente"
     except Exception as e:
         return False, f"❌ Error al guardar: {str(e)}"
 
 def update_worker(worker_id, data):
     try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
         depto_id = get_id_by_nombre("departamentos", data['departamento'])
         sub_id = get_id_by_nombre("subdepartamentos", data['subdepartamento'])
         puesto_id = get_id_by_nombre("puestos", data['puesto'])
-        supabase.table('trabajadores').update({
-            'apellido_paterno': data['apellido_paterno'], 'apellido_materno': data['apellido_materno'],
-            'nombre': data['nombre'], 'correo': data['correo'], 'telefono': data['telefono'],
-            'departamento_id': depto_id, 'subdepartamento_id': sub_id, 'tipo_nomina': data['tipo_nomina'],
-            'puesto_id': puesto_id, 'estatus': data['estatus'], 'updated_at': get_mexico_datetime().isoformat()
-        }).eq('id', worker_id).execute()
-        invalidar_cache()
+        
+        cursor.execute("""
+            UPDATE trabajadores 
+            SET apellido_paterno = ?,
+                apellido_materno = ?,
+                nombre = ?,
+                correo = ?,
+                telefono = ?,
+                departamento_id = ?,
+                subdepartamento_id = ?,
+                tipo_nomina = ?,
+                puesto_id = ?,
+                estatus = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        """, (data['apellido_paterno'], data['apellido_materno'], data['nombre'],
+              data['correo'], data['telefono'], depto_id, sub_id, 
+              data['tipo_nomina'], puesto_id, data['estatus'], worker_id))
+        
+        conn.commit()
+        conn.close()
         return True, "✅ Cambios guardados correctamente"
     except Exception as e:
         return False, f"❌ Error al actualizar: {str(e)}"
 
 def dar_baja(worker_id, fecha_baja):
     try:
-        supabase.table('trabajadores').update({'estatus': 'baja', 'fecha_baja': fecha_baja, 'updated_at': get_mexico_datetime().isoformat()}).eq('id', worker_id).execute()
-        invalidar_cache()
-        return True, f"✅ Trabajador dado de baja correctamente"
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE trabajadores 
+            SET estatus = 'baja', 
+                fecha_baja = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        """, (fecha_baja, worker_id))
+        conn.commit()
+        conn.close()
+        return True, "✅ Trabajador dado de baja correctamente"
     except Exception as e:
         return False, f"❌ Error al dar de baja: {str(e)}"
 
 def reactivar_trabajador(worker_id):
     try:
-        supabase.table('trabajadores').update({'estatus': 'activo', 'fecha_baja': None, 'updated_at': get_mexico_datetime().isoformat()}).eq('id', worker_id).execute()
-        invalidar_cache()
-        return True, f"✅ Trabajador reactivado correctamente"
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE trabajadores 
+            SET estatus = 'activo', 
+                fecha_baja = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        """, (worker_id,))
+        conn.commit()
+        conn.close()
+        return True, "✅ Trabajador reactivado correctamente"
     except Exception as e:
         return False, f"❌ Error al reactivar: {str(e)}"
 
 def search_workers(search_term, estatus_filter="todos"):
-    try:
-        query = supabase.table('trabajadores').select("""
-            id, nombre, apellido_paterno, apellido_materno, correo, telefono, estatus, fecha_alta, fecha_baja, tipo_nomina,
-            departamentos:departamento_id (nombre), subdepartamentos:subdepartamento_id (nombre), puestos:puesto_id (nombre)
-        """)
-        if search_term:
-            query = query.or_(f"nombre.ilike.%{search_term}%,apellido_paterno.ilike.%{search_term}%,apellido_materno.ilike.%{search_term}%")
-        if estatus_filter != "todos":
-            query = query.eq('estatus', estatus_filter)
-        result = query.order('apellido_paterno').execute()
-        data = []
-        for row in result.data:
-            data.append({
-                'id': row['id'], 'nombre': row['nombre'], 'apellido_paterno': row['apellido_paterno'],
-                'apellido_materno': row['apellido_materno'] or '', 'correo': row['correo'] or '', 'telefono': row['telefono'] or '',
-                'estatus': row['estatus'], 'fecha_alta': row['fecha_alta'], 'fecha_baja': row['fecha_baja'],
-                'departamento': row['departamentos']['nombre'] if row['departamentos'] else 'Sin asignar',
-                'subdepartamento': row['subdepartamentos']['nombre'] if row['subdepartamentos'] else 'Sin asignar',
-                'puesto': row['puestos']['nombre'] if row['puestos'] else 'Sin asignar', 'tipo_nomina': row['tipo_nomina']
-            })
-        return pd.DataFrame(data)
-    except Exception as e:
-        return pd.DataFrame()
-
-def get_recolectores():
-    try:
-        result = supabase.table('trabajadores').select('id, nombre, apellido_paterno').eq('estatus', 'activo').execute()
-        return [(row['id'], f"{row['nombre']} {row['apellido_paterno']}") for row in result.data]
-    except:
-        return []
-
-def get_pesadores():
-    try:
-        result = supabase.table('trabajadores').select('id, nombre, apellido_paterno, puestos:puesto_id (nombre)').eq('estatus', 'activo').execute()
-        pesadores = []
-        for row in result.data:
-            puesto_nombre = row['puestos']['nombre'] if row['puestos'] else ''
-            if 'pesador' in puesto_nombre.lower() or 'calidad' in puesto_nombre.lower():
-                pesadores.append((row['id'], f"{row['nombre']} {row['apellido_paterno']}"))
-        if not pesadores:
-            pesadores = [(row['id'], f"{row['nombre']} {row['apellido_paterno']}") for row in result.data]
-        return pesadores
-    except:
-        return []
+    conn = sqlite3.connect(DB_PATH)
+    query = """
+        SELECT t.id, t.nombre, t.apellido_paterno, t.apellido_materno,
+               t.correo, t.telefono, t.estatus, t.fecha_alta, t.fecha_baja,
+               COALESCE(d.nombre, 'Sin asignar') as departamento, 
+               COALESCE(s.nombre, 'Sin asignar') as subdepartamento,
+               COALESCE(p.nombre, 'Sin asignar') as puesto, 
+               t.tipo_nomina
+        FROM trabajadores t
+        LEFT JOIN departamentos d ON t.departamento_id = d.id
+        LEFT JOIN subdepartamentos s ON t.subdepartamento_id = s.id
+        LEFT JOIN puestos p ON t.puesto_id = p.id
+        WHERE (LOWER(t.nombre) LIKE LOWER(?) 
+           OR LOWER(t.apellido_paterno) LIKE LOWER(?)
+           OR LOWER(t.apellido_materno) LIKE LOWER(?))
+    """
+    params = [f"%{search_term}%", f"%{search_term}%", f"%{search_term}%"]
+    
+    if estatus_filter != "todos":
+        query += f" AND t.estatus = '{estatus_filter}'"
+    
+    query += " ORDER BY t.apellido_paterno, t.nombre"
+    
+    df = pd.read_sql_query(query, conn, params=params)
+    conn.close()
+    return df
 
 # ==========================================
 # FUNCIONES PARA INVERNADEROS
 # ==========================================
 
-def add_invernadero(nombre, ubicacion, lineas_totales=40):
+def get_invernaderos():
+    conn = sqlite3.connect(DB_PATH)
+    df = pd.read_sql_query("SELECT id, nombre, ubicacion FROM invernaderos WHERE activo = 1 ORDER BY nombre", conn)
+    conn.close()
+    return [(row['id'], row['nombre'], row['ubicacion']) for _, row in df.iterrows()]
+
+def add_invernadero(nombre, ubicacion):
     try:
-        supabase.table('invernaderos').insert({'nombre': nombre.strip().upper(), 'ubicacion': ubicacion, 'lineas_totales': lineas_totales, 'activo': True}).execute()
-        invalidar_cache()
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO invernaderos (nombre, ubicacion) VALUES (?, ?)", 
+                      (nombre.strip().upper(), ubicacion))
+        conn.commit()
+        conn.close()
         return True, "✅ Invernadero agregado correctamente"
+    except sqlite3.IntegrityError:
+        return False, "❌ Este invernadero ya existe"
     except Exception as e:
-        if 'duplicate key' in str(e).lower():
-            return False, "❌ Este invernadero ya existe"
         return False, f"❌ Error: {str(e)}"
 
-def update_invernadero(invernadero_id, nombre, ubicacion, lineas_totales):
+def update_invernadero(invernadero_id, nombre, ubicacion):
     try:
-        supabase.table('invernaderos').update({'nombre': nombre.strip().upper(), 'ubicacion': ubicacion, 'lineas_totales': lineas_totales}).eq('id', invernadero_id).execute()
-        invalidar_cache()
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("UPDATE invernaderos SET nombre = ?, ubicacion = ? WHERE id = ?", 
+                      (nombre.strip().upper(), ubicacion, invernadero_id))
+        conn.commit()
+        conn.close()
         return True, "✅ Invernadero actualizado correctamente"
     except Exception as e:
         return False, f"❌ Error: {str(e)}"
 
 def delete_invernadero(invernadero_id):
     try:
-        check = supabase.table('asistencia').select('id', count='exact').eq('invernadero_id', invernadero_id).execute()
-        if check.count and check.count > 0:
-            supabase.table('invernaderos').update({'activo': False}).eq('id', invernadero_id).execute()
-            invalidar_cache()
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT COUNT(*) FROM asistencia WHERE invernadero_id = ?", (invernadero_id,))
+        count = cursor.fetchone()[0]
+        if count > 0:
+            cursor.execute("UPDATE invernaderos SET activo = 0 WHERE id = ?", (invernadero_id,))
+            conn.commit()
+            conn.close()
             return True, "✅ Invernadero desactivado correctamente"
-        supabase.table('invernaderos').delete().eq('id', invernadero_id).execute()
-        invalidar_cache()
+        
+        cursor.execute("DELETE FROM invernaderos WHERE id = ?", (invernadero_id,))
+        conn.commit()
+        conn.close()
         return True, "✅ Invernadero eliminado correctamente"
     except Exception as e:
         return False, f"❌ Error: {str(e)}"
-
-# ==========================================
-# FUNCIONES DE AVANCE DE COSECHA
-# ==========================================
-
-def get_lineas_totales_por_invernadero(invernadero_id, invernadero_nombre):
-    import re
-    match = re.search(r'\d+', invernadero_nombre)
-    if match:
-        numero = int(match.group())
-        if 1 <= numero <= 8:
-            return 40
-        elif 9 <= numero <= 11:
-            return 36
-    return 40
-
-def get_ultimo_avance_dia(invernadero_id, fecha=None):
-    if not fecha:
-        fecha = get_mexico_date()
-    try:
-        result = supabase.table('avance_cosecha').select('lineas_cosechadas, porcentaje, hora, turno, es_acumulado')\
-            .eq('invernadero_id', invernadero_id).eq('fecha', fecha.isoformat()).order('created_at', desc=True).limit(1).execute()
-        if result.data:
-            row = result.data[0]
-            return {'lineas_cosechadas': row['lineas_cosechadas'], 'porcentaje': row['porcentaje'], 'hora': row['hora'], 'turno': row['turno'], 'es_acumulado': row['es_acumulado']}
-        return None
-    except:
-        return None
-
-def get_avance_hoy_por_invernadero():
-    fecha_hoy = get_mexico_date().isoformat()
-    try:
-        result = supabase.table('avance_cosecha').select("*, invernaderos:invernadero_id (nombre)").eq('fecha', fecha_hoy).execute()
-        ultimos = {}
-        for row in result.data:
-            inv_id = row['invernadero_id']
-            if inv_id not in ultimos or row['created_at'] > ultimos[inv_id]['created_at']:
-                ultimos[inv_id] = row
-        data = []
-        for inv_id, row in ultimos.items():
-            data.append({
-                'id': row['id'], 'invernadero_id': inv_id, 'fecha': row['fecha'], 'hora': row['hora'], 'turno': row['turno'],
-                'semana': row['semana'], 'lineas_cosechadas': row['lineas_cosechadas'], 'lineas_totales': row['lineas_totales'],
-                'porcentaje': row['porcentaje'], 'supervisor': row['supervisor'], 'observaciones': row['observaciones'],
-                'es_acumulado': row['es_acumulado'], 'invernadero_nombre': row['invernaderos']['nombre'] if row['invernaderos'] else 'Desconocido'
-            })
-        invernaderos = get_all_invernaderos()
-        inv_con_datos = set([d['invernadero_id'] for d in data])
-        for inv_id, inv_nombre, inv_ubic, lineas in invernaderos:
-            if inv_id not in inv_con_datos:
-                data.append({
-                    'id': None, 'invernadero_id': inv_id, 'fecha': fecha_hoy, 'hora': None, 'turno': None,
-                    'semana': get_mexico_week(), 'lineas_cosechadas': 0, 'lineas_totales': lineas,
-                    'porcentaje': 0.0, 'supervisor': None, 'observaciones': None, 'es_acumulado': 0, 'invernadero_nombre': inv_nombre
-                })
-        return pd.DataFrame(data)
-    except Exception as e:
-        return pd.DataFrame()
-
-def get_avance_historico_por_dia(fecha_inicio=None, fecha_fin=None, invernadero_id=None, turno=None):
-    if not fecha_inicio:
-        fecha_inicio = get_mexico_date() - timedelta(days=30)
-    if not fecha_fin:
-        fecha_fin = get_mexico_date()
-    try:
-        query = supabase.table('avance_cosecha').select("*, invernaderos:invernadero_id (nombre)").gte('fecha', fecha_inicio.isoformat()).lte('fecha', fecha_fin.isoformat())
-        if invernadero_id:
-            query = query.eq('invernadero_id', invernadero_id)
-        if turno:
-            query = query.eq('turno', turno)
-        result = query.order('fecha', desc=True).order('created_at', desc=True).execute()
-        ultimos = {}
-        for row in result.data:
-            key = f"{row['invernadero_id']}_{row['fecha']}"
-            if key not in ultimos:
-                ultimos[key] = row
-        data = []
-        for row in ultimos.values():
-            data.append({
-                'id': row['id'], 'invernadero_id': row['invernadero_id'], 'fecha': row['fecha'], 'hora': row['hora'],
-                'turno': row['turno'], 'semana': row['semana'], 'lineas_cosechadas': row['lineas_cosechadas'],
-                'lineas_totales': row['lineas_totales'], 'porcentaje': row['porcentaje'], 'supervisor': row['supervisor'],
-                'observaciones': row['observaciones'], 'es_acumulado': row['es_acumulado'],
-                'invernadero_nombre': row['invernaderos']['nombre'] if row['invernaderos'] else 'Desconocido'
-            })
-        return pd.DataFrame(data)
-    except:
-        return pd.DataFrame()
-
-def registrar_avance_cosecha(invernadero_id, invernadero_nombre, lineas_cosechadas, supervisor, observaciones, turno=None):
-    try:
-        fecha_actual = get_mexico_date()
-        hora_actual = get_mexico_time().strftime("%H:%M:%S")
-        semana_actual = get_mexico_week()
-        lineas_totales = get_lineas_totales_por_invernadero(invernadero_id, invernadero_nombre)
-        check = supabase.table('avance_cosecha').select('id', count='exact').eq('invernadero_id', invernadero_id).eq('fecha', fecha_actual.isoformat()).execute()
-        registros_hoy = check.count if check.count else 0
-        if lineas_cosechadas > lineas_totales:
-            return False, f"❌ Las líneas cosechadas ({lineas_cosechadas}) no pueden exceder el total ({lineas_totales})"
-        if not turno:
-            hora_int = int(hora_actual.split(':')[0])
-            if 6 <= hora_int < 10:
-                turno = "Reporte 10:00am"
-            elif 10 <= hora_int < 12:
-                turno = "Reporte 12:00pm"
-            elif 12 <= hora_int < 14:
-                turno = "Reporte 02:00pm"
-            elif 14 <= hora_int < 15:
-                turno = "Reporte 03:00pm"
-            elif 15 <= hora_int < 16:
-                turno = "Reporte 04:00pm"
-            elif 16 <= hora_int < 17:
-                turno = "Reporte 05:00pm"
-            elif 17 <= hora_int < 18:
-                turno = "Reporte 06:00pm"
-            elif 18 <= hora_int < 19:
-                turno = "Reporte 07:00pm"
-            else:
-                turno = "Reporte 08:00pm"
-        porcentaje = (lineas_cosechadas / lineas_totales) * 100
-        supabase.table('avance_cosecha').insert({
-            'invernadero_id': invernadero_id, 'fecha': fecha_actual.isoformat(), 'hora': hora_actual,
-            'turno': turno, 'semana': semana_actual, 'lineas_cosechadas': lineas_cosechadas,
-            'lineas_totales': lineas_totales, 'porcentaje': porcentaje, 'supervisor': supervisor,
-            'observaciones': observaciones, 'es_acumulado': False
-        }).execute()
-        invalidar_cache()
-        if registros_hoy == 0:
-            return True, f"✅ Primer avance del día registrado: {porcentaje:.1f}% completado (Turno: {turno})"
-        else:
-            return True, f"✅ Avance actualizado: {porcentaje:.1f}% completado (Turno: {turno})"
-    except Exception as e:
-        return False, f"❌ Error al registrar avance: {str(e)}"
-
-# ==========================================
-# FUNCIONES DE COSECHA Y TRASLADOS
-# ==========================================
-
-def guardar_cosecha(data):
-    try:
-        if data['presentacion'] == "12 oz":
-            numero_cajas = data['cantidad_clams'] / 6
-        else:
-            numero_cajas = data['cantidad_clams'] / 12
-        porcentaje_merma = (data.get('merma_kilos', 0) / data['cantidad_clams'] * 100) if data['cantidad_clams'] > 0 else 0
-        supabase.table('cosechas').insert({
-            'fecha': data['fecha'].isoformat() if isinstance(data['fecha'], date) else data['fecha'],
-            'dia': data['dia'], 'semana': data['semana'], 'trabajador_id': data['trabajador_id'],
-            'invernadero_id': data['invernadero_id'], 'tipo_cosecha': data['tipo_cosecha'],
-            'calidad': data['calidad'], 'presentacion': data['presentacion'],
-            'cantidad_clams': data['cantidad_clams'], 'numero_cajas': numero_cajas,
-            'cajas_enviadas': 0, 'merma_kilos': data.get('merma_kilos', 0),
-            'porcentaje_merma': porcentaje_merma, 'observaciones': data.get('observaciones', '')
-        }).execute()
-        invalidar_cache()
-        return True, f"✅ Cosecha registrada correctamente - {numero_cajas:.2f} cajas - Merma: {data.get('merma_kilos', 0):.2f} kg ({porcentaje_merma:.1f}%)"
-    except Exception as e:
-        return False, f"❌ Error al guardar: {str(e)}"
-
-def get_cosechas(fecha_inicio=None, fecha_fin=None, invernadero_id=None):
-    try:
-        query = supabase.table('cosechas').select("""
-            *, trabajadores:trabajador_id (nombre, apellido_paterno), invernaderos:invernadero_id (nombre)
-        """)
-        if fecha_inicio:
-            query = query.gte('fecha', fecha_inicio.isoformat() if isinstance(fecha_inicio, date) else fecha_inicio)
-        if fecha_fin:
-            query = query.lte('fecha', fecha_fin.isoformat() if isinstance(fecha_fin, date) else fecha_fin)
-        if invernadero_id:
-            query = query.eq('invernadero_id', invernadero_id)
-        result = query.order('fecha', desc=True).order('id', desc=True).execute()
-        data = []
-        for row in result.data:
-            trabajador_nombre = f"{row['trabajadores'].get('nombre', '')} {row['trabajadores'].get('apellido_paterno', '')}" if row['trabajadores'] else ""
-            data.append({
-                'id': row['id'], 'fecha': row['fecha'], 'dia': row['dia'], 'semana': row['semana'],
-                'trabajador_id': row['trabajador_id'], 'trabajador_nombre': trabajador_nombre,
-                'invernadero_id': row['invernadero_id'], 'invernadero_nombre': row['invernaderos']['nombre'] if row['invernaderos'] else 'Desconocido',
-                'tipo_cosecha': row['tipo_cosecha'], 'calidad': row.get('calidad', ''), 'presentacion': row['presentacion'],
-                'cantidad_clams': row['cantidad_clams'], 'numero_cajas': row['numero_cajas'],
-                'cajas_enviadas': row['cajas_enviadas'], 'cajas_disponibles': row['numero_cajas'] - row['cajas_enviadas'],
-                'merma_kilos': row.get('merma_kilos', 0), 'porcentaje_merma': row.get('porcentaje_merma', 0),
-                'observaciones': row.get('observaciones', '')
-            })
-        return pd.DataFrame(data)
-    except:
-        return pd.DataFrame()
-
-# ==========================================
-# FUNCIONES PARA CAJAS DISPONIBLES
-# ==========================================
-
-def get_cajas_disponibles_por_invernadero(invernadero_id):
-    try:
-        result = supabase.table('cosechas').select('numero_cajas, cajas_enviadas').eq('invernadero_id', invernadero_id).execute()
-        disponibles = sum(row['numero_cajas'] - row['cajas_enviadas'] for row in result.data)
-        return disponibles
-    except:
-        return 0
-
-def get_detalle_cajas_por_invernadero_presentacion(invernadero_id):
-    try:
-        result = supabase.table('cosechas').select('presentacion, numero_cajas, cajas_enviadas').eq('invernadero_id', invernadero_id).execute()
-        resultados = {'6 oz': 0, '12 oz': 0}
-        for row in result.data:
-            disponibles = row['numero_cajas'] - row['cajas_enviadas']
-            if row['presentacion'] in resultados:
-                resultados[row['presentacion']] += disponibles
-        return resultados
-    except:
-        return {'6 oz': 0, '12 oz': 0}
-
-def get_detalle_cajas_por_invernadero(invernadero_id):
-    try:
-        cosechas = supabase.table('cosechas').select('id, fecha, presentacion, cantidad_clams, numero_cajas, cajas_enviadas')\
-            .eq('invernadero_id', invernadero_id).order('fecha', desc=True).order('id', desc=True).execute()
-        cosechas_data = []
-        for row in cosechas.data:
-            cosechas_data.append({
-                'id': row['id'], 'fecha': row['fecha'], 'presentacion': row['presentacion'],
-                'cantidad_clams': row['cantidad_clams'], 'numero_cajas': row['numero_cajas'],
-                'cajas_enviadas': row['cajas_enviadas'], 'disponibles': row['numero_cajas'] - row['cajas_enviadas']
-            })
-        traslados = supabase.table('traslados_camara_fria').select("""
-            id, fecha, hora, tipo_envio, presentacion, cantidad_cajas, lote, observaciones,
-            trabajadores:trabajador_id (nombre, apellido_paterno), recolectores:recolector_id (nombre, apellido_paterno)
-        """).eq('invernadero_id', invernadero_id).order('fecha', desc=True).order('hora', desc=True).execute()
-        traslados_data = []
-        for row in traslados.data:
-            supervisor = f"{row['trabajadores'].get('nombre', '')} {row['trabajadores'].get('apellido_paterno', '')}" if row['trabajadores'] else ""
-            recolector = f"{row['recolectores'].get('nombre', '')} {row['recolectores'].get('apellido_paterno', '')}" if row['recolectores'] else ""
-            traslados_data.append({
-                'id': row['id'], 'fecha': row['fecha'], 'hora': row['hora'], 'tipo_envio': row['tipo_envio'],
-                'presentacion': row['presentacion'], 'cantidad_cajas': row['cantidad_cajas'], 'lote': row.get('lote', ''),
-                'observaciones': row.get('observaciones', ''), 'supervisor': supervisor, 'recolector': recolector
-            })
-        return pd.DataFrame(cosechas_data), pd.DataFrame(traslados_data)
-    except:
-        return pd.DataFrame(), pd.DataFrame()
-
-def get_resumen_cajas_por_invernadero():
-    try:
-        invernaderos = get_all_invernaderos()
-        resumen = []
-        for inv_id, inv_nombre, _, _ in invernaderos:
-            result = supabase.table('cosechas').select('numero_cajas, cajas_enviadas').eq('invernadero_id', inv_id).execute()
-            cosechadas = sum(row['numero_cajas'] for row in result.data)
-            enviadas = sum(row['cajas_enviadas'] for row in result.data)
-            resumen.append({'id': inv_id, 'invernadero': inv_nombre, 'cosechadas': cosechadas, 'enviadas': enviadas, 'disponibles': cosechadas - enviadas})
-        return pd.DataFrame(resumen)
-    except:
-        return pd.DataFrame()
-
-# ==========================================
-# FUNCIONES DE TRASLADOS A CÁMARA FRÍA
-# ==========================================
-
-def registrar_traslado_camara_fria(invernadero_id, cantidad_cajas, trabajador_envia_id, recolector_id, tipo_envio, presentacion, lote, observaciones):
-    try:
-        fecha_actual = get_mexico_date()
-        hora_actual = get_mexico_time().strftime("%H:%M:%S")
-        semana_actual = get_mexico_week()
-        supabase.table('traslados_camara_fria').insert({
-            'fecha': fecha_actual.isoformat(), 'hora': hora_actual, 'semana': semana_actual,
-            'invernadero_id': invernadero_id, 'trabajador_id': trabajador_envia_id, 'recolector_id': recolector_id,
-            'tipo_envio': tipo_envio, 'presentacion': presentacion, 'cantidad_cajas': cantidad_cajas,
-            'lote': lote if lote else None, 'observaciones': observaciones if observaciones else None
-        }).execute()
-        cosechas = supabase.table('cosechas').select('id, numero_cajas, cajas_enviadas').eq('invernadero_id', invernadero_id).eq('presentacion', presentacion).order('fecha', desc=True).order('id', desc=True).execute()
-        cajas_restantes = cantidad_cajas
-        for cosecha in cosechas.data:
-            if cajas_restantes <= 0:
-                break
-            disponibles = cosecha['numero_cajas'] - cosecha['cajas_enviadas']
-            if disponibles > 0:
-                a_enviar = min(disponibles, cajas_restantes)
-                supabase.table('cosechas').update({'cajas_enviadas': cosecha['cajas_enviadas'] + a_enviar}).eq('id', cosecha['id']).execute()
-                cajas_restantes -= a_enviar
-        invalidar_cache()
-        return True, f"✅ Traslado registrado correctamente"
-    except Exception as e:
-        return False, f"❌ Error al registrar: {str(e)}"
-
-def get_traslados_camara_fria(fecha_inicio=None, fecha_fin=None, invernadero_id=None):
-    try:
-        query = supabase.table('traslados_camara_fria').select("""
-            *, invernaderos:invernadero_id (nombre), trabajadores:trabajador_id (nombre, apellido_paterno),
-            recolectores:recolector_id (nombre, apellido_paterno)
-        """)
-        if fecha_inicio:
-            query = query.gte('fecha', fecha_inicio.isoformat() if isinstance(fecha_inicio, date) else fecha_inicio)
-        if fecha_fin:
-            query = query.lte('fecha', fecha_fin.isoformat() if isinstance(fecha_fin, date) else fecha_fin)
-        if invernadero_id:
-            query = query.eq('invernadero_id', invernadero_id)
-        result = query.order('fecha', desc=True).order('hora', desc=True).execute()
-        data = []
-        for row in result.data:
-            trabajador_envia = f"{row['trabajadores'].get('nombre', '')} {row['trabajadores'].get('apellido_paterno', '')}" if row['trabajadores'] else ""
-            recolector = f"{row['recolectores'].get('nombre', '')} {row['recolectores'].get('apellido_paterno', '')}" if row['recolectores'] else ""
-            data.append({
-                'id': row['id'], 'fecha': row['fecha'], 'hora': row['hora'], 'semana': row['semana'],
-                'invernadero_id': row['invernadero_id'], 'invernadero': row['invernaderos']['nombre'] if row['invernaderos'] else 'Desconocido',
-                'trabajador_id': row['trabajador_id'], 'trabajador_envia': trabajador_envia, 'recolector': recolector,
-                'tipo_envio': row['tipo_envio'], 'presentacion': row['presentacion'], 'cantidad_cajas': row['cantidad_cajas'],
-                'lote': row.get('lote', ''), 'observaciones': row.get('observaciones', '')
-            })
-        return pd.DataFrame(data)
-    except:
-        return pd.DataFrame()
-
-# ==========================================
-# FUNCIONES DE PESAJE DE CAJAS
-# ==========================================
-
-def registrar_pesaje_cajas(traslado_id, invernadero_id, trabajador_id, presentacion, cantidad_pesadas, cajas_recibidas, nota):
-    try:
-        fecha_actual = get_mexico_date()
-        hora_actual = get_mexico_time().strftime("%H:%M:%S")
-        semana_actual = get_mexico_week()
-        diferencia = cantidad_pesadas - cajas_recibidas
-        supabase.table('pesaje_cajas').insert({
-            'fecha': fecha_actual.isoformat(), 'hora': hora_actual, 'semana': semana_actual,
-            'traslado_id': traslado_id, 'invernadero_id': invernadero_id, 'trabajador_id': trabajador_id,
-            'presentacion': presentacion, 'cantidad_cajas_pesadas': cantidad_pesadas,
-            'cajas_recibidas': cajas_recibidas, 'diferencia': diferencia, 'nota': nota
-        }).execute()
-        invalidar_cache()
-        if diferencia != 0:
-            return True, f"✅ Pesaje registrado - Diferencia de {abs(diferencia)} cajas ({'faltan' if diferencia < 0 else 'sobran'})"
-        return True, f"✅ Pesaje registrado - Coincidencia perfecta"
-    except Exception as e:
-        return False, f"❌ Error al registrar pesaje: {str(e)}"
-
-def get_pesajes(fecha_inicio=None, fecha_fin=None, invernadero_id=None):
-    try:
-        query = supabase.table('pesaje_cajas').select("""
-            *, invernaderos:invernadero_id (nombre), trabajadores:trabajador_id (nombre, apellido_paterno),
-            traslados_camara_fria:traslado_id (cantidad_cajas, presentacion)
-        """)
-        if fecha_inicio:
-            query = query.gte('fecha', fecha_inicio.isoformat())
-        if fecha_fin:
-            query = query.lte('fecha', fecha_fin.isoformat())
-        if invernadero_id:
-            query = query.eq('invernadero_id', invernadero_id)
-        result = query.order('fecha', desc=True).execute()
-        data = []
-        for row in result.data:
-            data.append({
-                'fecha': row['fecha'], 'hora': row['hora'], 'invernadero': row['invernaderos']['nombre'] if row['invernaderos'] else '',
-                'pesador': f"{row['trabajadores']['nombre']} {row['trabajadores']['apellido_paterno']}" if row['trabajadores'] else '',
-                'presentacion': row['presentacion'], 'cajas_enviadas': row['traslados_camara_fria']['cantidad_cajas'] if row['traslados_camara_fria'] else 0,
-                'cajas_pesadas': row['cantidad_cajas_pesadas'], 'cajas_recibidas': row['cajas_recibidas'],
-                'diferencia': row['diferencia'], 'nota': row.get('nota', '')
-            })
-        return pd.DataFrame(data)
-    except:
-        return pd.DataFrame()
-
-# ==========================================
-# FUNCIONES DE CAJAS EN MESA
-# ==========================================
-
-def registrar_cajas_mesa(invernadero_id, trabajador_id, cantidad_cajas, presentacion, solicitando_apoyo, observaciones):
-    try:
-        fecha_actual = get_mexico_date()
-        hora_actual = get_mexico_time().strftime("%H:%M:%S")
-        supabase.table('cajas_mesa').insert({
-            'fecha': fecha_actual.isoformat(), 'hora': hora_actual, 'invernadero_id': invernadero_id,
-            'trabajador_id': trabajador_id, 'cantidad_cajas': cantidad_cajas, 'presentacion': presentacion,
-            'solicitando_apoyo': solicitando_apoyo, 'observaciones': observaciones
-        }).execute()
-        invalidar_cache()
-        if solicitando_apoyo:
-            return True, "✅ Registro guardado - Se ha notificado la solicitud de apoyo"
-        return True, "✅ Registro guardado correctamente"
-    except Exception as e:
-        return False, f"❌ Error al registrar: {str(e)}"
-
-def get_cajas_mesa(fecha=None, solo_pendientes=True):
-    try:
-        query = supabase.table('cajas_mesa').select("""
-            *, invernaderos:invernadero_id (nombre), trabajadores:trabajador_id (nombre, apellido_paterno)
-        """)
-        if fecha:
-            query = query.eq('fecha', fecha.isoformat())
-        if solo_pendientes:
-            query = query.eq('atendido', False)
-        result = query.order('created_at', desc=True).execute()
-        data = []
-        for row in result.data:
-            data.append({
-                'id': row['id'], 'fecha': row['fecha'], 'hora': row['hora'],
-                'invernadero': row['invernaderos']['nombre'] if row['invernaderos'] else '',
-                'trabajador': f"{row['trabajadores']['nombre']} {row['trabajadores']['apellido_paterno']}" if row['trabajadores'] else '',
-                'cantidad_cajas': row['cantidad_cajas'], 'presentacion': row['presentacion'],
-                'solicita_apoyo': row['solicitando_apoyo'], 'atendido': row['atendido'], 'observaciones': row.get('observaciones', '')
-            })
-        return pd.DataFrame(data)
-    except:
-        return pd.DataFrame()
-
-def marcar_atendido_caja_mesa(caja_id, atendido_por):
-    try:
-        supabase.table('cajas_mesa').update({'atendido': True, 'atendido_por': atendido_por}).eq('id', caja_id).execute()
-        invalidar_cache()
-        return True, "✅ Solicitud marcada como atendida"
-    except Exception as e:
-        return False, f"❌ Error: {str(e)}"
-
-# ==========================================
-# FUNCIONES DE CONTROL DE ASISTENCIA
-# ==========================================
-
-def registrar_evento_asistencia(trabajador_id, invernadero_id, tipo_evento):
-    try:
-        fecha_actual = get_mexico_date()
-        hora_actual = get_mexico_time().strftime("%H:%M:%S")
-        if tipo_evento == 'entrada_invernadero':
-            registro_activo = supabase.table('asistencia').select('*').eq('trabajador_id', trabajador_id).eq('fecha', fecha_actual.isoformat()).neq('estado', 'finalizado').order('id', desc=True).limit(1).execute()
-            if registro_activo.data:
-                reg = registro_activo.data[0]
-                if reg.get('invernadero_id') != invernadero_id:
-                    return False, "❌ Tienes un registro activo en otro invernadero. Primero debes registrar salida."
-                return False, "❌ Ya tienes un registro activo hoy"
-            supabase.table('asistencia').insert({
-                'trabajador_id': trabajador_id, 'invernadero_id': invernadero_id, 'fecha': fecha_actual.isoformat(),
-                'hora_entrada': hora_actual, 'estado': 'activo', 'tipo_movimiento': tipo_evento
-            }).execute()
-            supabase.table('registros_asistencia').insert({
-                'trabajador_id': trabajador_id, 'invernadero_id': invernadero_id, 'fecha': fecha_actual.isoformat(),
-                'hora': hora_actual, 'tipo_evento': tipo_evento
-            }).execute()
-        elif tipo_evento == 'salida_invernadero':
-            registro_activo = supabase.table('asistencia').select('*').eq('trabajador_id', trabajador_id).eq('fecha', fecha_actual.isoformat()).neq('estado', 'finalizado').order('id', desc=True).limit(1).execute()
-            if not registro_activo.data:
-                return False, "❌ No hay registro de entrada activo"
-            reg = registro_activo.data[0]
-            if reg.get('hora_entrada') is None:
-                return False, "❌ Primero debes registrar entrada"
-            if reg.get('hora_salida') is not None:
-                return False, "❌ Ya registraste salida"
-            supabase.table('asistencia').update({'hora_salida': hora_actual, 'estado': 'finalizado', 'tipo_movimiento': tipo_evento}).eq('id', reg['id']).execute()
-            supabase.table('registros_asistencia').insert({
-                'trabajador_id': trabajador_id, 'invernadero_id': reg.get('invernadero_id'), 'fecha': fecha_actual.isoformat(),
-                'hora': hora_actual, 'tipo_evento': tipo_evento
-            }).execute()
-        elif tipo_evento == 'salida_comer':
-            registro_activo = supabase.table('asistencia').select('*').eq('trabajador_id', trabajador_id).eq('fecha', fecha_actual.isoformat()).neq('estado', 'finalizado').order('id', desc=True).limit(1).execute()
-            if not registro_activo.data:
-                return False, "❌ No hay registro de entrada activo"
-            reg = registro_activo.data[0]
-            if reg.get('hora_entrada') is None:
-                return False, "❌ Primero debes registrar entrada"
-            if reg.get('hora_salida_comida') is not None:
-                return False, "❌ Ya registraste salida a comer"
-            supabase.table('asistencia').update({'hora_salida_comida': hora_actual, 'estado': 'comida', 'tipo_movimiento': tipo_evento}).eq('id', reg['id']).execute()
-            supabase.table('registros_asistencia').insert({
-                'trabajador_id': trabajador_id, 'invernadero_id': reg.get('invernadero_id'), 'fecha': fecha_actual.isoformat(),
-                'hora': hora_actual, 'tipo_evento': tipo_evento
-            }).execute()
-        elif tipo_evento == 'regreso_comida':
-            registro_activo = supabase.table('asistencia').select('*').eq('trabajador_id', trabajador_id).eq('fecha', fecha_actual.isoformat()).neq('estado', 'finalizado').order('id', desc=True).limit(1).execute()
-            if not registro_activo.data:
-                return False, "❌ No hay registro de entrada activo"
-            reg = registro_activo.data[0]
-            if reg.get('hora_salida_comida') is None:
-                return False, "❌ Primero debes registrar salida a comer"
-            if reg.get('hora_entrada_comida') is not None:
-                return False, "❌ Ya registraste regreso de comida"
-            supabase.table('asistencia').update({'hora_entrada_comida': hora_actual, 'estado': 'activo', 'tipo_movimiento': tipo_evento}).eq('id', reg['id']).execute()
-            supabase.table('registros_asistencia').insert({
-                'trabajador_id': trabajador_id, 'invernadero_id': reg.get('invernadero_id'), 'fecha': fecha_actual.isoformat(),
-                'hora': hora_actual, 'tipo_evento': tipo_evento
-            }).execute()
-        invalidar_cache()
-        mensajes = {'entrada_invernadero': "✅ Entrada registrada correctamente", 'salida_invernadero': "✅ Salida registrada correctamente", 'salida_comer': "✅ Salida a comer registrada", 'regreso_comida': "✅ Regreso de comida registrado"}
-        return True, mensajes.get(tipo_evento, "✅ Evento registrado correctamente")
-    except Exception as e:
-        return False, f"❌ Error al registrar: {str(e)}"
-
-def get_estado_asistencia_actual(trabajador_id):
-    try:
-        fecha_actual = get_mexico_date()
-        result = supabase.table('asistencia').select("*, invernaderos:invernadero_id (nombre)").eq('trabajador_id', trabajador_id).eq('fecha', fecha_actual.isoformat()).neq('estado', 'finalizado').order('id', desc=True).limit(1).execute()
-        if result.data:
-            reg = result.data[0]
-            return {
-                'id': reg['id'], 'estado': reg['estado'], 'hora_entrada': reg.get('hora_entrada'),
-                'hora_salida_comida': reg.get('hora_salida_comida'), 'hora_entrada_comida': reg.get('hora_entrada_comida'),
-                'hora_salida': reg.get('hora_salida'), 'invernadero': reg['invernaderos']['nombre'] if reg.get('invernaderos') else None
-            }
-        return None
-    except:
-        return None
-
-def get_registros_asistencia(filtros=None):
-    try:
-        query = supabase.table('registros_asistencia').select("""
-            *, trabajadores:trabajador_id (nombre, apellido_paterno), invernaderos:invernadero_id (nombre)
-        """)
-        if filtros:
-            if filtros.get('trabajador_id'):
-                query = query.eq('trabajador_id', filtros['trabajador_id'])
-            if filtros.get('fecha_inicio'):
-                query = query.gte('fecha', filtros['fecha_inicio'].isoformat() if isinstance(filtros['fecha_inicio'], date) else filtros['fecha_inicio'])
-            if filtros.get('fecha_fin'):
-                query = query.lte('fecha', filtros['fecha_fin'].isoformat() if isinstance(filtros['fecha_fin'], date) else filtros['fecha_fin'])
-            if filtros.get('tipo_evento') and filtros.get('tipo_evento') != "Todos":
-                query = query.eq('tipo_evento', filtros['tipo_evento'])
-        result = query.order('fecha', desc=True).order('hora', desc=True).execute()
-        data = []
-        for row in result.data:
-            trabajador = f"{row['trabajadores'].get('nombre', '')} {row['trabajadores'].get('apellido_paterno', '')}" if row['trabajadores'] else ""
-            tipo_evento_display = {'entrada_invernadero': 'Entrada a Invernadero', 'salida_comer': 'Salida a Comer', 'regreso_comida': 'Regreso de Comida', 'salida_invernadero': 'Salida'}.get(row['tipo_evento'], row['tipo_evento'])
-            data.append({
-                'id': row['id'], 'trabajador': trabajador, 'trabajador_id': row['trabajador_id'],
-                'invernadero': row['invernaderos']['nombre'] if row['invernaderos'] else None,
-                'fecha': row['fecha'], 'hora': row['hora'], 'tipo_evento': tipo_evento_display,
-                'fecha_registro': f"{row['fecha']} {row['hora']}"
-            })
-        return pd.DataFrame(data)
-    except:
-        return pd.DataFrame()
-
-def get_resumen_asistencia_dia(fecha=None):
-    if not fecha:
-        fecha = get_mexico_date()
-    try:
-        trabajadores = get_all_workers()
-        asistencias = supabase.table('asistencia').select("*, invernaderos:invernadero_id (nombre)").eq('fecha', fecha.isoformat()).execute()
-        asis_dict = {row['trabajador_id']: row for row in asistencias.data}
-        descansos = supabase.table('descansos').select('*').eq('fecha', fecha.isoformat()).execute()
-        descansos_dict = {row['trabajador_id']: row for row in descansos.data}
-        incidencias = supabase.table('incidencias').select('*').eq('fecha', fecha.isoformat()).execute()
-        incidencias_dict = {row['trabajador_id']: row for row in incidencias.data}
-        data = []
-        for _, trabajador in trabajadores.iterrows():
-            trabajador_id = trabajador['id']
-            asistencia = asis_dict.get(trabajador_id, {})
-            descanso = descansos_dict.get(trabajador_id)
-            incidencia = incidencias_dict.get(trabajador_id)
-            estado_actual = ""
-            if descanso:
-                estado_actual = 'Descanso'
-            elif incidencia:
-                estado_actual = f"Incidencia: {incidencia.get('tipo_incidencia', '')}"
-            elif not asistencia.get('hora_entrada'):
-                estado_actual = 'Falta'
-            elif not asistencia.get('hora_salida'):
-                estado_actual = 'En invernadero'
-            elif asistencia.get('hora_salida_comida') and not asistencia.get('hora_entrada_comida'):
-                estado_actual = 'En comida'
-            else:
-                estado_actual = 'Finalizado'
-            data.append({
-                'trabajador_id': trabajador_id, 'trabajador': f"{trabajador['nombre']} {trabajador['apellido_paterno']}",
-                'hora_entrada': asistencia.get('hora_entrada'), 'hora_salida_comida': asistencia.get('hora_salida_comida'),
-                'hora_entrada_comida': asistencia.get('hora_entrada_comida'), 'hora_salida': asistencia.get('hora_salida'),
-                'invernadero': asistencia.get('invernaderos', {}).get('nombre') if asistencia.get('invernaderos') else None,
-                'estado_actual': estado_actual
-            })
-        return pd.DataFrame(data)
-    except:
-        return pd.DataFrame()
-
-def get_estadisticas_asistencia(fecha_inicio=None, fecha_fin=None):
-    if not fecha_inicio:
-        fecha_inicio = get_mexico_date() - timedelta(days=30)
-    if not fecha_fin:
-        fecha_fin = get_mexico_date()
-    try:
-        registros = get_registros_asistencia({'fecha_inicio': fecha_inicio, 'fecha_fin': fecha_fin})
-        if registros.empty:
-            return {'registros_por_tipo': pd.DataFrame(), 'horas_promedio': pd.DataFrame(), 'tiempo_invernadero': pd.DataFrame(), 'asistencia_diaria': pd.DataFrame(), 'faltas_descansos': pd.DataFrame()}
-        registros_por_tipo = registros.groupby('tipo_evento').size().reset_index(name='cantidad')
-        asistencias = supabase.table('asistencia').select('trabajador_id, fecha, hora_entrada, hora_salida, hora_entrada_comida, hora_salida_comida').gte('fecha', fecha_inicio.isoformat()).lte('fecha', fecha_fin.isoformat()).execute()
-        horas_data = []
-        for row in asistencias.data:
-            if row.get('hora_entrada') and row.get('hora_salida'):
-                try:
-                    entrada = datetime.strptime(row['hora_entrada'], '%H:%M:%S')
-                    salida = datetime.strptime(row['hora_salida'], '%H:%M:%S')
-                    horas = (salida - entrada).seconds / 3600
-                    if row.get('hora_salida_comida') and row.get('hora_entrada_comida'):
-                        salida_comida = datetime.strptime(row['hora_salida_comida'], '%H:%M:%S')
-                        entrada_comida = datetime.strptime(row['hora_entrada_comida'], '%H:%M:%S')
-                        horas -= (entrada_comida - salida_comida).seconds / 3600
-                    horas_data.append({'trabajador_id': row['trabajador_id'], 'horas': horas})
-                except:
-                    pass
-        if horas_data:
-            horas_df = pd.DataFrame(horas_data)
-            horas_promedio = horas_df.groupby('trabajador_id')['horas'].mean().reset_index()
-            trabajadores = get_all_workers()
-            if not trabajadores.empty:
-                horas_promedio = horas_promedio.merge(trabajadores[['id', 'nombre', 'apellido_paterno']], left_on='trabajador_id', right_on='id')
-                horas_promedio['trabajador'] = horas_promedio['nombre'] + ' ' + horas_promedio['apellido_paterno']
-        else:
-            horas_promedio = pd.DataFrame()
-        asistencia_diaria = registros.groupby('fecha').size().reset_index(name='total_registros')
-        return {'registros_por_tipo': registros_por_tipo, 'horas_promedio': horas_promedio, 'tiempo_invernadero': pd.DataFrame(), 'asistencia_diaria': asistencia_diaria, 'faltas_descansos': pd.DataFrame()}
-    except:
-        return {'registros_por_tipo': pd.DataFrame(), 'horas_promedio': pd.DataFrame(), 'tiempo_invernadero': pd.DataFrame(), 'asistencia_diaria': pd.DataFrame(), 'faltas_descansos': pd.DataFrame()}
 
 # ==========================================
 # FUNCIONES DE DESCANSO
@@ -1269,1665 +673,2236 @@ def get_estadisticas_asistencia(fecha_inicio=None, fecha_fin=None):
 
 def registrar_descanso(trabajador_id, fecha, tipo_descanso, observaciones=""):
     try:
-        supabase.table('descansos').upsert({'trabajador_id': trabajador_id, 'fecha': fecha.isoformat() if isinstance(fecha, date) else fecha, 'tipo_descanso': tipo_descanso, 'observaciones': observaciones}).execute()
-        invalidar_cache()
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            INSERT OR REPLACE INTO descansos (trabajador_id, fecha, tipo_descanso, observaciones)
+            VALUES (?, ?, ?, ?)
+        """, (trabajador_id, fecha, tipo_descanso, observaciones))
+        
+        conn.commit()
+        conn.close()
         return True, f"✅ Descanso registrado: {tipo_descanso}"
     except Exception as e:
         return False, f"❌ Error: {str(e)}"
 
 def get_descansos(fecha_inicio=None, fecha_fin=None):
-    try:
-        query = supabase.table('descansos').select("*, trabajadores:trabajador_id (nombre, apellido_paterno)")
-        if fecha_inicio:
-            query = query.gte('fecha', fecha_inicio.isoformat() if isinstance(fecha_inicio, date) else fecha_inicio)
-        if fecha_fin:
-            query = query.lte('fecha', fecha_fin.isoformat() if isinstance(fecha_fin, date) else fecha_fin)
-        result = query.order('fecha', desc=True).execute()
-        data = []
-        for row in result.data:
-            trabajador = f"{row['trabajadores'].get('nombre', '')} {row['trabajadores'].get('apellido_paterno', '')}" if row['trabajadores'] else ""
-            data.append({'id': row['id'], 'trabajador_id': row['trabajador_id'], 'trabajador': trabajador, 'fecha': row['fecha'], 'tipo_descanso': row['tipo_descanso'], 'observaciones': row.get('observaciones', '')})
-        return pd.DataFrame(data)
-    except:
-        return pd.DataFrame()
+    conn = sqlite3.connect(DB_PATH)
+    query = """
+        SELECT d.*, 
+               t.nombre || ' ' || t.apellido_paterno as trabajador
+        FROM descansos d
+        LEFT JOIN trabajadores t ON d.trabajador_id = t.id
+        WHERE 1=1
+    """
+    params = []
+    
+    if fecha_inicio:
+        query += " AND d.fecha >= ?"
+        params.append(fecha_inicio)
+    if fecha_fin:
+        query += " AND d.fecha <= ?"
+        params.append(fecha_fin)
+    
+    query += " ORDER BY d.fecha DESC"
+    
+    df = pd.read_sql_query(query, conn, params=params if params else None)
+    conn.close()
+    return df
 
 # ==========================================
-# FUNCIONES DE INCIDENCIAS
+# FUNCIONES DE CONTROL DE ASISTENCIA
 # ==========================================
 
-def registrar_incidencia(trabajador_id, fecha, tipo_incidencia, subtipo, horas_afectadas, justificada, observaciones, registrado_por):
+def registrar_evento_asistencia(trabajador_id, invernadero_id, tipo_evento):
     try:
-        supabase.table('incidencias').insert({
-            'trabajador_id': trabajador_id, 'fecha': fecha.isoformat() if isinstance(fecha, date) else fecha,
-            'tipo_incidencia': tipo_incidencia, 'subtipo': subtipo, 'horas_afectadas': horas_afectadas,
-            'justificada': justificada, 'observaciones': observaciones, 'registrado_por': registrado_por
-        }).execute()
-        invalidar_cache()
-        return True, f"✅ Incidencia registrada: {tipo_incidencia}"
-    except Exception as e:
-        return False, f"❌ Error al registrar: {str(e)}"
-
-def get_incidencias(fecha_inicio=None, fecha_fin=None, trabajador_id=None):
-    try:
-        query = supabase.table('incidencias').select("*, trabajadores:trabajador_id (nombre, apellido_paterno)")
-        if fecha_inicio:
-            query = query.gte('fecha', fecha_inicio.isoformat() if isinstance(fecha_inicio, date) else fecha_inicio)
-        if fecha_fin:
-            query = query.lte('fecha', fecha_fin.isoformat() if isinstance(fecha_fin, date) else fecha_fin)
-        if trabajador_id:
-            query = query.eq('trabajador_id', trabajador_id)
-        result = query.order('fecha', desc=True).order('created_at', desc=True).execute()
-        data = []
-        for row in result.data:
-            trabajador = f"{row['trabajadores'].get('nombre', '')} {row['trabajadores'].get('apellido_paterno', '')}" if row['trabajadores'] else ""
-            data.append({
-                'id': row['id'], 'trabajador_id': row['trabajador_id'], 'trabajador': trabajador,
-                'fecha': row['fecha'], 'tipo_incidencia': row['tipo_incidencia'], 'subtipo': row.get('subtipo'),
-                'horas_afectadas': row.get('horas_afectadas', 0), 'justificada': row.get('justificada', False),
-                'observaciones': row.get('observaciones', ''), 'registrado_por': row.get('registrado_por', ''),
-                'created_at': row.get('created_at')
-            })
-        return pd.DataFrame(data)
-    except:
-        return pd.DataFrame()
-
-def get_resumen_incidencias(fecha_inicio=None, fecha_fin=None):
-    incidencias = get_incidencias(fecha_inicio, fecha_fin)
-    if incidencias.empty:
-        return {'resumen_tipo': pd.DataFrame(), 'resumen_trabajador': pd.DataFrame()}
-    resumen_tipo = incidencias.groupby('tipo_incidencia').agg({'id': 'count', 'justificada': 'sum', 'horas_afectadas': 'sum'}).rename(columns={'id': 'cantidad'}).reset_index()
-    resumen_tipo['injustificadas'] = resumen_tipo['cantidad'] - resumen_tipo['justificada']
-    return {'resumen_tipo': resumen_tipo, 'resumen_trabajador': pd.DataFrame()}
-
-# ==========================================
-# FUNCIONES DE MERMA
-# ==========================================
-
-def registrar_merma(invernadero_id, supervisor_nombre, kilos_merma, tipo_merma, observaciones, registrado_por):
-    try:
-        fecha_actual = get_mexico_date()
-        hora_actual = get_mexico_time().strftime("%H:%M:%S")
-        semana_actual = get_mexico_week()
-        supabase.table('merma').insert({
-            'fecha': fecha_actual.isoformat(), 'hora': hora_actual, 'semana': semana_actual,
-            'invernadero_id': invernadero_id, 'supervisor_nombre': supervisor_nombre,
-            'kilos_merma': kilos_merma, 'tipo_merma': tipo_merma, 'observaciones': observaciones,
-            'registrado_por': registrado_por
-        }).execute()
-        invalidar_cache()
-        return True, "✅ Merma registrada correctamente"
-    except Exception as e:
-        return False, f"❌ Error al registrar: {str(e)}"
-
-def get_merma(fecha_inicio=None, fecha_fin=None, invernadero_id=None):
-    try:
-        query = supabase.table('merma').select("*, invernaderos:invernadero_id (nombre)")
-        if fecha_inicio:
-            query = query.gte('fecha', fecha_inicio.isoformat() if isinstance(fecha_inicio, date) else fecha_inicio)
-        if fecha_fin:
-            query = query.lte('fecha', fecha_fin.isoformat() if isinstance(fecha_fin, date) else fecha_fin)
-        if invernadero_id:
-            query = query.eq('invernadero_id', invernadero_id)
-        result = query.order('fecha', desc=True).order('hora', desc=True).execute()
-        data = []
-        for row in result.data:
-            data.append({
-                'id': row['id'], 'fecha': row['fecha'], 'hora': row['hora'], 'semana': row['semana'],
-                'invernadero_id': row['invernadero_id'], 'invernadero_nombre': row['invernaderos']['nombre'] if row['invernaderos'] else 'Desconocido',
-                'supervisor_nombre': row['supervisor_nombre'], 'kilos_merma': row['kilos_merma'],
-                'tipo_merma': row['tipo_merma'], 'observaciones': row.get('observaciones', ''),
-                'registrado_por': row.get('registrado_por', '')
-            })
-        return pd.DataFrame(data)
-    except:
-        return pd.DataFrame()
-
-def get_stats_merma(fecha_inicio=None, fecha_fin=None):
-    merma = get_merma(fecha_inicio, fecha_fin)
-    if merma.empty:
-        return {'total_merma': 0, 'merma_por_invernadero': pd.DataFrame(), 'merma_por_tipo': pd.DataFrame(), 'merma_diaria': pd.DataFrame(), 'top_supervisores': pd.DataFrame()}
-    total_merma = merma['kilos_merma'].sum() if 'kilos_merma' in merma.columns else 0
-    merma_por_invernadero = merma.groupby('invernadero_nombre').agg({'kilos_merma': 'sum', 'id': 'count'}).rename(columns={'id': 'cantidad_registros'}).reset_index()
-    if 'kilos_merma' in merma_por_invernadero.columns:
-        merma_por_invernadero['promedio_merma'] = merma_por_invernadero['kilos_merma'] / merma_por_invernadero['cantidad_registros']
-    merma_por_tipo = merma.groupby('tipo_merma').agg({'kilos_merma': 'sum', 'id': 'count'}).rename(columns={'id': 'cantidad_registros'}).reset_index()
-    merma_diaria = merma.groupby('fecha').agg({'kilos_merma': 'sum', 'id': 'count'}).rename(columns={'id': 'registros'}).reset_index()
-    top_supervisores = merma.groupby('supervisor_nombre').agg({'kilos_merma': 'sum', 'id': 'count'}).rename(columns={'id': 'cantidad_registros'}).reset_index().head(10)
-    return {'total_merma': total_merma, 'merma_por_invernadero': merma_por_invernadero, 'merma_por_tipo': merma_por_tipo, 'merma_diaria': merma_diaria, 'top_supervisores': top_supervisores}
-
-# ==========================================
-# FUNCIONES DE PROYECCIONES
-# ==========================================
-
-PESO_CAJA = 2.16
-
-def calcular_porcentaje_merma_filtrado(kilos_enviados, cosecha_total):
-    if cosecha_total <= 0:
-        return 0
-    cajas_enviadas = kilos_enviados / PESO_CAJA
-    return (cajas_enviadas / cosecha_total) * 100
-
-def obtener_porcentaje_merma_filtrado(df_cosechas, df_traslados):
-    if df_cosechas.empty or df_traslados.empty:
-        return 0
-    cosecha_total_kilos = df_cosechas['cantidad_clams'].sum() if not df_cosechas.empty else 0
-    kilos_enviados = df_traslados['cantidad_cajas'].sum() * PESO_CAJA if not df_traslados.empty else 0
-    if kilos_enviados > 0 and cosecha_total_kilos > 0:
-        return calcular_porcentaje_merma_filtrado(kilos_enviados, cosecha_total_kilos)
-    return 0
-
-def registrar_proyeccion(semana, cajas_proyectadas, registrado_por, observaciones=""):
-    try:
-        supabase.table('proyecciones_cajas').upsert({'semana': semana, 'cajas_proyectadas': cajas_proyectadas, 'registrado_por': registrado_por, 'observaciones': observaciones}).execute()
-        invalidar_cache()
-        return True, f"✅ Proyección registrada para semana {semana}"
-    except Exception as e:
-        return False, f"❌ Error al registrar proyección: {str(e)}"
-
-def get_proyecciones(semana=None):
-    try:
-        query = supabase.table('proyecciones_cajas').select('*')
-        if semana:
-            query = query.eq('semana', semana)
-        result = query.order('semana', desc=True).execute()
-        data = [{'id': row['id'], 'semana': row['semana'], 'cajas_proyectadas': row['cajas_proyectadas'], 'fecha_registro': row['fecha_registro'], 'registrado_por': row.get('registrado_por', ''), 'observaciones': row.get('observaciones', '')} for row in result.data]
-        return pd.DataFrame(data)
-    except:
-        return pd.DataFrame()
-
-def get_comparativa_proyeccion_real_con_filtros(semana_inicio=None, semana_fin=None, tipo_cosecha=None, presentacion=None):
-    try:
-        query_cosechas = supabase.table('cosechas').select('semana, numero_cajas')
-        if semana_inicio:
-            query_cosechas = query_cosechas.gte('semana', semana_inicio)
-        if semana_fin:
-            query_cosechas = query_cosechas.lte('semana', semana_fin)
-        if tipo_cosecha and tipo_cosecha != "Todos":
-            query_cosechas = query_cosechas.eq('tipo_cosecha', tipo_cosecha)
-        if presentacion and presentacion != "Todos":
-            query_cosechas = query_cosechas.eq('presentacion', presentacion)
-        cosechas = query_cosechas.execute()
-        real_dict = {}
-        for row in cosechas.data:
-            semana = row['semana']
-            real_dict[semana] = real_dict.get(semana, 0) + row['numero_cajas']
-        proyecciones = get_proyecciones()
-        semanas = set(real_dict.keys()) | set(proyecciones['semana'].tolist() if not proyecciones.empty else [])
-        semanas = sorted([s for s in semanas if s >= (semana_inicio or 1) and s <= (semana_fin or 52)])
-        data = []
-        for semana in semanas:
-            cajas_reales = real_dict.get(semana, 0)
-            cajas_proyectadas = proyecciones[proyecciones['semana'] == semana]['cajas_proyectadas'].iloc[0] if not proyecciones.empty and not proyecciones[proyecciones['semana'] == semana].empty else 0
-            diferencia = cajas_reales - cajas_proyectadas
-            porcentaje_desviacion = (diferencia / cajas_proyectadas * 100) if cajas_proyectadas > 0 else 0
-            data.append({'semana': semana, 'cajas_proyectadas': cajas_proyectadas, 'cajas_reales': cajas_reales, 'diferencia': diferencia, 'porcentaje_desviacion': porcentaje_desviacion, 'estado': '✅ Superávit' if diferencia >= 0 else '⚠️ Déficit'})
-        return pd.DataFrame(data)
-    except:
-        return pd.DataFrame()
-
-def get_resumen_proyecciones_total_con_filtros_dashboard(df_cosechas):
-    try:
-        proyecciones = get_proyecciones()
-        total_real = df_cosechas['numero_cajas'].sum() if not df_cosechas.empty else 0
-        total_proyectado = proyecciones['cajas_proyectadas'].sum() if not proyecciones.empty else 0
-        diferencia = total_real - total_proyectado
-        porcentaje = (diferencia / total_proyectado * 100) if total_proyectado > 0 else 0
-        return {'total_proyectado': total_proyectado, 'total_real': total_real, 'diferencia': diferencia, 'porcentaje_desviacion': porcentaje}
-    except:
-        return {'total_proyectado': 0, 'total_real': 0, 'diferencia': 0, 'porcentaje_desviacion': 0}
-
-# ==========================================
-# FUNCIONES DE CIERRE DE DÍA Y AUDITORÍA
-# ==========================================
-
-def generar_reporte_auditoria_dia(fecha):
-    try:
-        cosechas = get_cosechas(fecha_inicio=fecha, fecha_fin=fecha)
-        traslados = get_traslados_camara_fria(fecha_inicio=fecha, fecha_fin=fecha)
-        pesajes = get_pesajes(fecha_inicio=fecha, fecha_fin=fecha)
-        merma = get_merma(fecha_inicio=fecha, fecha_fin=fecha)
-        asistencia = get_registros_asistencia({'fecha_inicio': fecha, 'fecha_fin': fecha})
-        avance = get_avance_hoy_por_invernadero()
-        cajas_mesa = get_cajas_mesa(fecha=fecha, solo_pendientes=False)
-        incidencias = get_incidencias(fecha_inicio=fecha, fecha_fin=fecha)
-        total_cajas_cosechadas = cosechas['numero_cajas'].sum() if not cosechas.empty else 0
-        total_cajas_trasladadas = traslados['cantidad_cajas'].sum() if not traslados.empty else 0
-        total_pesado = pesajes['cajas_pesadas'].sum() if not pesajes.empty else 0
-        total_recibido = pesajes['cajas_recibidas'].sum() if not pesajes.empty else 0
-        diferencia_total = total_pesado - total_recibido
-        reporte = {
-            'fecha': fecha.isoformat(),
-            'generado_por': st.session_state.get('user_nombre', 'Sistema'),
-            'resumen': {
-                'total_cajas_cosechadas': float(total_cajas_cosechadas),
-                'total_cajas_trasladadas': float(total_cajas_trasladadas),
-                'total_cajas_pesadas': float(total_pesado),
-                'total_cajas_recibidas': float(total_recibido),
-                'diferencia_pesaje': float(diferencia_total),
-                'total_merma_kilos': float(merma['kilos_merma'].sum() if not merma.empty else 0),
-                'total_personal_asistencia': asistencia['trabajador'].nunique() if not asistencia.empty else 0,
-                'promedio_avance': float(avance['porcentaje'].mean() if not avance.empty else 0),
-                'total_incidencias': len(incidencias) if not incidencias.empty else 0,
-                'total_solicitudes_apoyo': len(cajas_mesa[cajas_mesa['solicita_apoyo'] == True]) if not cajas_mesa.empty else 0
-            },
-            'detalle_cosechas': cosechas.to_dict('records') if not cosechas.empty else [],
-            'detalle_traslados': traslados.to_dict('records') if not traslados.empty else [],
-            'detalle_pesajes': pesajes.to_dict('records') if not pesajes.empty else [],
-            'detalle_merma': merma.to_dict('records') if not merma.empty else [],
-            'detalle_cajas_mesa': cajas_mesa.to_dict('records') if not cajas_mesa.empty else [],
-            'detalle_incidencias': incidencias.to_dict('records') if not incidencias.empty else []
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        fecha_actual = datetime.now().date()
+        hora_actual = datetime.now().time()
+        
+        cursor.execute("""
+            SELECT id, estado, hora_entrada, hora_salida_comida, hora_entrada_comida, hora_salida
+            FROM asistencia 
+            WHERE trabajador_id = ? AND fecha = ? AND estado != 'finalizado'
+            ORDER BY id DESC LIMIT 1
+        """, (trabajador_id, fecha_actual))
+        
+        registro_activo = cursor.fetchone()
+        
+        if tipo_evento == 'entrada_invernadero':
+            if registro_activo:
+                return False, "❌ Ya tienes un registro activo hoy"
+            
+            cursor.execute("""
+                INSERT INTO asistencia 
+                (trabajador_id, invernadero_id, fecha, hora_entrada, estado, tipo_movimiento)
+                VALUES (?, ?, ?, ?, 'activo', ?)
+            """, (trabajador_id, invernadero_id, fecha_actual, hora_actual, tipo_evento))
+            
+        elif tipo_evento == 'salida_comer':
+            if not registro_activo:
+                return False, "❌ No hay registro de entrada activo"
+            if registro_activo[2] is None:
+                return False, "❌ Primero debes registrar entrada"
+            if registro_activo[3] is not None:
+                return False, "❌ Ya registraste salida a comer"
+            
+            cursor.execute("""
+                UPDATE asistencia 
+                SET hora_salida_comida = ?, estado = 'comida', tipo_movimiento = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            """, (hora_actual, tipo_evento, registro_activo[0]))
+            
+        elif tipo_evento == 'regreso_comida':
+            if not registro_activo:
+                return False, "❌ No hay registro de entrada activo"
+            if registro_activo[3] is None:
+                return False, "❌ Primero debes registrar salida a comer"
+            if registro_activo[4] is not None:
+                return False, "❌ Ya registraste regreso de comida"
+            
+            cursor.execute("""
+                UPDATE asistencia 
+                SET hora_entrada_comida = ?, estado = 'activo', tipo_movimiento = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            """, (hora_actual, tipo_evento, registro_activo[0]))
+            
+        elif tipo_evento == 'salida_invernadero':
+            if not registro_activo:
+                return False, "❌ No hay registro de entrada activo"
+            if registro_activo[2] is None:
+                return False, "❌ Primero debes registrar entrada"
+            if registro_activo[5] is not None:
+                return False, "❌ Ya registraste salida"
+            
+            cursor.execute("""
+                UPDATE asistencia 
+                SET hora_salida = ?, estado = 'finalizado', tipo_movimiento = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            """, (hora_actual, tipo_evento, registro_activo[0]))
+        
+        cursor.execute("""
+            INSERT INTO registros_asistencia 
+            (trabajador_id, invernadero_id, fecha, hora, tipo_evento, observaciones)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (trabajador_id, invernadero_id, fecha_actual, hora_actual, tipo_evento, 
+              f"Registrado desde sistema"))
+        
+        conn.commit()
+        conn.close()
+        
+        mensajes = {
+            'entrada_invernadero': "✅ Entrada registrada correctamente",
+            'salida_comer': "✅ Salida a comer registrada",
+            'regreso_comida': "✅ Regreso de comida registrado",
+            'salida_invernadero': "✅ Salida registrada correctamente"
         }
-        return reporte
-    except Exception as e:
-        st.error(f"Error al generar reporte: {str(e)}")
-        return None
-
-def registrar_cierre_dia(fecha, cerrado_por):
-    try:
-        existente = supabase.table('cierres_dia').select('id').eq('fecha', fecha.isoformat()).execute()
-        if existente.data:
-            return False, "❌ Este día ya fue cerrado anteriormente"
-        reporte = generar_reporte_auditoria_dia(fecha)
-        if reporte:
-            supabase.table('cierres_dia').insert({'fecha': fecha.isoformat(), 'cerrado_por': cerrado_por, 'reporte': reporte}).execute()
-            invalidar_cache()
-            return True, "✅ Cierre de día registrado exitosamente"
-        return False, "❌ Error al generar el reporte"
-    except Exception as e:
-        return False, f"❌ Error: {str(e)}"
-
-def get_cierres_dia():
-    try:
-        result = supabase.table('cierres_dia').select('*').order('fecha', desc=True).execute()
-        return pd.DataFrame([{'fecha': row['fecha'], 'cerrado_por': row['cerrado_por'], 'created_at': row['created_at']} for row in result.data])
-    except:
-        return pd.DataFrame()
-
-def descargar_reporte_auditoria_pdf(reporte, fecha):
-    try:
-        buffer = BytesIO()
-        c = canvas.Canvas(buffer, pagesize=letter)
-        width, height = letter
-        y = height - 50
-        c.setFont("Helvetica-Bold", 16)
-        c.drawString(50, y, f"📊 REPORTE DE AUDITORÍA - {fecha}")
-        y -= 30
-        c.setFont("Helvetica", 12)
-        c.drawString(50, y, f"Generado por: {reporte.get('generado_por', 'Sistema')}")
-        y -= 20
-        c.drawString(50, y, f"Fecha de generación: {get_mexico_datetime().strftime('%d/%m/%Y %H:%M:%S')}")
-        y -= 40
-        c.setFont("Helvetica-Bold", 14)
-        c.drawString(50, y, "📈 RESUMEN DEL DÍA")
-        y -= 25
-        c.setFont("Helvetica", 10)
-        resumen = reporte.get('resumen', {})
-        c.drawString(50, y, f"📦 Cajas Cosechadas: {resumen.get('total_cajas_cosechadas', 0):.2f}")
-        y -= 15
-        c.drawString(50, y, f"🚚 Cajas Trasladadas a Cámara Fría: {resumen.get('total_cajas_trasladadas', 0):.2f}")
-        y -= 15
-        c.drawString(50, y, f"⚖️ Cajas Pesadas: {resumen.get('total_cajas_pesadas', 0):.2f}")
-        y -= 15
-        c.drawString(50, y, f"✅ Cajas Recibidas: {resumen.get('total_cajas_recibidas', 0):.2f}")
-        y -= 15
-        c.drawString(50, y, f"📊 Diferencia en Pesaje: {resumen.get('diferencia_pesaje', 0):+.2f}")
-        y -= 15
-        c.drawString(50, y, f"🗑️ Merma Total: {resumen.get('total_merma_kilos', 0):.2f} kg")
-        y -= 15
-        c.drawString(50, y, f"👥 Personal con Asistencia: {resumen.get('total_personal_asistencia', 0)}")
-        y -= 15
-        c.drawString(50, y, f"📊 Avance Promedio: {resumen.get('promedio_avance', 0):.1f}%")
-        y -= 15
-        c.drawString(50, y, f"⚠️ Total Incidencias: {resumen.get('total_incidencias', 0)}")
-        y -= 15
-        c.drawString(50, y, f"🆘 Solicitudes de Apoyo: {resumen.get('total_solicitudes_apoyo', 0)}")
-        c.save()
-        buffer.seek(0)
-        return buffer
-    except Exception as e:
-        return None
-
-# ==========================================
-# FUNCIONES DE QR Y ESCANEO
-# ==========================================
-
-def procesar_qr_data(qr_data):
-    try:
-        id_match = re.search(r'[?&]id=([^&]+)', qr_data)
-        nombre_match = re.search(r'[?&]nombre=([^&]+)', qr_data)
-        if id_match and nombre_match:
-            return id_match.group(1), nombre_match.group(1).replace('%20', ' ').replace('+', ' ')
-        if '|' in qr_data:
-            partes = qr_data.split('|')
-            if len(partes) >= 2:
-                return partes[0], partes[1]
-        return None, None
-    except:
-        return None, None
-
-def registrar_escaneo_qr(id_trabajador, nombre_trabajador, tipo_evento="entrada", invernadero_id=None):
-    try:
-        fecha_actual = get_mexico_date().strftime("%d/%m/%Y")
-        hora_actual = get_mexico_time().strftime("%H:%M:%S")
-        supabase.table('registros_escaneo').insert({
-            'id_trabajador': str(id_trabajador), 'nombre_trabajador': nombre_trabajador,
-            'fecha_escaneo': fecha_actual, 'hora_escaneo': hora_actual,
-            'tipo_evento': tipo_evento, 'invernadero_id': invernadero_id
-        }).execute()
-        invalidar_cache()
-        return True, f"✅ {nombre_trabajador} registrado exitosamente"
+        
+        return True, mensajes.get(tipo_evento, "✅ Evento registrado correctamente")
+        
     except Exception as e:
         return False, f"❌ Error al registrar: {str(e)}"
 
-def generar_qr_trabajador_simple(id_trabajador, nombre, url_base="http://localhost:8501"):
-    url = f"{url_base}?id={id_trabajador}&nombre={nombre.replace(' ', '%20')}"
-    qr = qrcode.QRCode(version=1, box_size=10, border=5, error_correction=qrcode.constants.ERROR_CORRECT_L)
-    qr.add_data(url)
-    qr.make(fit=True)
-    img = qr.make_image(fill_color="black", back_color="white")
-    img_bytes = io.BytesIO()
-    img.save(img_bytes, format='PNG')
-    img_bytes.seek(0)
-    return img_bytes
-
-# ==========================================
-# PROCESADOR DE VIDEO PARA QR
-# ==========================================
-
-class QRVideoProcessor(VideoProcessorBase):
-    def __init__(self):
-        self.qr_data = None
-        self.qr_detected = False
-        self.last_qr = None
-        self.last_qr_time = 0
-        self._frame_count = 0
-        self.result_queue = Queue()
-    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
-        self._frame_count += 1
-        if self._frame_count % 3 != 0:
-            return frame
-        img = frame.to_ndarray(format="bgr24")
-        try:
-            qr_codes = decode(img)
-            if qr_codes:
-                for qr in qr_codes:
-                    qr_data = qr.data.decode('utf-8')
-                    current_time = time.time()
-                    if qr_data != self.last_qr or (current_time - self.last_qr_time) > 2:
-                        self.last_qr = qr_data
-                        self.last_qr_time = current_time
-                        id_trabajador, nombre = procesar_qr_data(qr_data)
-                        if id_trabajador and nombre:
-                            self.qr_data = {'id': id_trabajador, 'nombre': nombre}
-                            self.qr_detected = True
-                            self.result_queue.put(self.qr_data)
-                            points = qr.polygon
-                            if points:
-                                pts = np.array(points, np.int32).reshape((-1, 1, 2))
-                                cv2.polylines(img, [pts], True, (0, 255, 0), 3)
-                                cv2.putText(img, "QR Detectado!", (pts[0][0][0], pts[0][0][1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                    else:
-                        points = qr.polygon
-                        if points:
-                            pts = np.array(points, np.int32).reshape((-1, 1, 2))
-                            cv2.polylines(img, [pts], True, (0, 255, 0), 2)
-            else:
-                cv2.putText(img, "Buscando QR...", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-        except:
-            pass
-        return av.VideoFrame.from_ndarray(img, format="bgr24")
-    def get_result(self):
-        if not self.result_queue.empty():
-            return self.result_queue.get()
+def get_estado_asistencia_actual(trabajador_id):
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT a.id, a.estado, a.hora_entrada, a.hora_salida_comida, 
+                   a.hora_entrada_comida, a.hora_salida, i.nombre as invernadero
+            FROM asistencia a
+            LEFT JOIN invernaderos i ON a.invernadero_id = i.id
+            WHERE a.trabajador_id = ? AND a.fecha = ? AND a.estado != 'finalizado'
+            ORDER BY a.id DESC LIMIT 1
+        """, (trabajador_id, datetime.now().date()))
+        
+        registro = cursor.fetchone()
+        conn.close()
+        
+        if registro:
+            return {
+                'id': registro[0],
+                'estado': registro[1],
+                'hora_entrada': registro[2],
+                'hora_salida_comida': registro[3],
+                'hora_entrada_comida': registro[4],
+                'hora_salida': registro[5],
+                'invernadero': registro[6]
+            }
+        return None
+    except Exception as e:
+        st.error(f"Error al obtener estado: {str(e)}")
         return None
 
-# ==========================================
-# FUNCIÓN DE ESCANEO QR CON CÁMARA
-# ==========================================
+def get_registros_asistencia(filtros=None):
+    conn = sqlite3.connect(DB_PATH)
+    
+    query = """
+        SELECT ra.id, 
+               t.nombre || ' ' || t.apellido_paterno as trabajador,
+               t.id as trabajador_id,
+               i.nombre as invernadero,
+               ra.fecha,
+               ra.hora,
+               ra.tipo_evento,
+               ra.observaciones,
+               ra.created_at
+        FROM registros_asistencia ra
+        LEFT JOIN trabajadores t ON ra.trabajador_id = t.id
+        LEFT JOIN invernaderos i ON ra.invernadero_id = i.id
+        WHERE 1=1
+    """
+    params = []
+    
+    if filtros:
+        if filtros.get('trabajador_id'):
+            query += " AND ra.trabajador_id = ?"
+            params.append(filtros['trabajador_id'])
+        
+        if filtros.get('fecha_inicio'):
+            query += " AND ra.fecha >= ?"
+            params.append(filtros['fecha_inicio'])
+        
+        if filtros.get('fecha_fin'):
+            query += " AND ra.fecha <= ?"
+            params.append(filtros['fecha_fin'])
+        
+        if filtros.get('tipo_evento'):
+            query += " AND ra.tipo_evento = ?"
+            params.append(filtros['tipo_evento'])
+    
+    query += " ORDER BY ra.fecha DESC, ra.hora DESC"
+    
+    try:
+        df = pd.read_sql_query(query, conn, params=params if params else None)
+    except Exception:
+        query_simple = """
+            SELECT ra.id, 
+                   t.nombre || ' ' || t.apellido_paterno as trabajador,
+                   t.id as trabajador_id,
+                   i.nombre as invernadero,
+                   ra.fecha,
+                   ra.hora,
+                   '' as tipo_evento,
+                   ra.observaciones,
+                   ra.created_at
+            FROM registros_asistencia ra
+            LEFT JOIN trabajadores t ON ra.trabajador_id = t.id
+            LEFT JOIN invernaderos i ON ra.invernadero_id = i.id
+            WHERE 1=1
+        """
+        if filtros:
+            if filtros.get('trabajador_id'):
+                query_simple += " AND ra.trabajador_id = ?"
+                params.append(filtros['trabajador_id'])
+            
+            if filtros.get('fecha_inicio'):
+                query_simple += " AND ra.fecha >= ?"
+                params.append(filtros['fecha_inicio'])
+            
+            if filtros.get('fecha_fin'):
+                query_simple += " AND ra.fecha <= ?"
+                params.append(filtros['fecha_fin'])
+        
+        query_simple += " ORDER BY ra.fecha DESC, ra.hora DESC"
+        df = pd.read_sql_query(query_simple, conn, params=params if params else None)
+    
+    conn.close()
+    return df
 
-def escanear_qr_con_camara(tipo_evento="asistencia", mostrar_invernadero=False):
-    st.markdown("### 📷 Escaneo Instantáneo con Cámara")
-    if 'qr_detected' not in st.session_state:
-        st.session_state.qr_detected = False
-    if 'scanned_worker' not in st.session_state:
-        st.session_state.scanned_worker = None
-    if 'show_form' not in st.session_state:
-        st.session_state.show_form = False
-    if st.button("🔄 Nuevo Escaneo", use_container_width=True):
-        st.session_state.qr_detected = False
-        st.session_state.scanned_worker = None
-        st.session_state.show_form = False
-        st.rerun()
-    if not st.session_state.show_form:
-        camera_image = st.camera_input("📸 Enfoca el código QR", key="qr_camera")
-        if camera_image:
-            image = Image.open(camera_image)
-            img_array = np.array(image)
-            qr_codes = decode(img_array)
-            if qr_codes:
-                for qr in qr_codes:
-                    qr_data = qr.data.decode('utf-8')
-                    id_trabajador, nombre = procesar_qr_data(qr_data)
-                    if id_trabajador and nombre:
-                        trabajador = get_worker_by_id(id_trabajador)
-                        if trabajador:
-                            st.session_state.scanned_worker = {'id': id_trabajador, 'nombre': nombre, 'data': trabajador}
-                            st.session_state.show_form = True
-                            st.session_state.qr_detected = True
-                            st.rerun()
-                        else:
-                            st.error(f"❌ Trabajador no encontrado: {nombre}")
-                    else:
-                        st.error("❌ QR no válido")
-            else:
-                st.warning("📷 No se detectó QR. Enfoca bien el código.")
-    if st.session_state.show_form and st.session_state.scanned_worker:
-        trabajador = st.session_state.scanned_worker
-        st.success(f"✅ QR Detectado: {trabajador['nombre']}")
-        if tipo_evento == "cosecha":
-            mostrar_formulario_cosecha_instant(trabajador['id'], trabajador['nombre'], mostrar_invernadero)
-        elif tipo_evento == "asistencia":
-            mostrar_formulario_asistencia_instant(trabajador['id'], trabajador['nombre'])
+def get_resumen_asistencia_dia(fecha=None):
+    if not fecha:
+        fecha = datetime.now().date()
+    
+    conn = sqlite3.connect(DB_PATH)
+    
+    query = """
+        SELECT 
+            t.id,
+            t.nombre || ' ' || t.apellido_paterno as trabajador,
+            a.hora_entrada,
+            a.hora_salida_comida,
+            a.hora_entrada_comida,
+            a.hora_salida,
+            i.nombre as invernadero,
+            a.estado,
+            d.tipo_descanso as descanso,
+            CASE 
+                WHEN d.tipo_descanso IS NOT NULL THEN 'Descanso'
+                WHEN a.hora_entrada IS NULL THEN 'Falta'
+                WHEN a.hora_salida IS NULL THEN 'En invernadero'
+                WHEN a.hora_salida_comida IS NOT NULL AND a.hora_entrada_comida IS NULL THEN 'En comida'
+                ELSE 'Finalizado'
+            END as estado_actual
+        FROM trabajadores t
+        LEFT JOIN asistencia a ON t.id = a.trabajador_id AND a.fecha = ?
+        LEFT JOIN invernaderos i ON a.invernadero_id = i.id
+        LEFT JOIN descansos d ON t.id = d.trabajador_id AND d.fecha = ?
+        WHERE t.estatus = 'activo'
+        ORDER BY t.apellido_paterno, t.nombre
+    """
+    
+    df = pd.read_sql_query(query, conn, params=(fecha, fecha))
+    conn.close()
+    return df
 
-def mostrar_formulario_cosecha_instant(id_trabajador, nombre, mostrar_invernadero):
-    st.markdown("### 📋 Registrar Cosecha")
-    invernadero_id = None
-    if mostrar_invernadero:
-        invernaderos = get_invernaderos_usuario()  # Usar solo invernaderos asignados
-        if invernaderos:
-            invernadero = st.selectbox("🏭 Invernadero:", invernaderos, format_func=lambda x: f"{x[1]} - {x[2]}", key="invernadero_instant")
-            invernadero_id = invernadero[0]
-        else:
-            st.error("❌ No tienes invernaderos asignados para hoy")
-            return
-    fecha_actual = get_mexico_date()
-    dia_espanol = get_mexico_day_spanish()
-    col1, col2, col3 = st.columns(3)
-    with col1: st.write(f"**📅 Fecha:** {fecha_actual.strftime('%d/%m/%Y')}")
-    with col2: st.write(f"**📆 Día:** {dia_espanol}")
-    with col3: st.write(f"**📊 Semana:** {get_mexico_week()}")
-    col1, col2 = st.columns(2)
-    with col1:
-        tipo_cosecha = st.radio("Tipo:", ["Nacional", "Exportación"], horizontal=True, key="tipo_instant")
-        if tipo_cosecha == "Nacional":
-            calidad = st.selectbox("Calidad:", ["Salmon", "Sobretono"], key="calidad_instant")
-        else:
-            calidad = None
-    with col2:
-        if tipo_cosecha == "Exportación":
-            presentacion = st.selectbox("Presentación:", ["6 oz", "12 oz"], key="pres_instant")
-        else:
-            presentacion = "6 oz"
-            st.info("✅ Presentación: 6 oz")
-    cantidad_clams = st.number_input("🍓 Cantidad de Clams:", min_value=0.0, value=0.0, step=1.0, key="clams_instant")
-    merma_kilos = st.number_input("🗑️ Merma (kilos):", min_value=0.0, value=0.0, step=0.5, key="merma_instant")
-    if presentacion == "12 oz":
-        cajas = cantidad_clams / 6 if cantidad_clams > 0 else 0
+def get_estadisticas_asistencia(fecha_inicio=None, fecha_fin=None):
+    if not fecha_inicio:
+        fecha_inicio = datetime.now().date() - timedelta(days=30)
+    if not fecha_fin:
+        fecha_fin = datetime.now().date()
+    
+    conn = sqlite3.connect(DB_PATH)
+    
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA table_info(registros_asistencia)")
+    columns = cursor.fetchall()
+    column_names = [col[1] for col in columns]
+    tiene_tipo_evento = 'tipo_evento' in column_names
+    
+    if tiene_tipo_evento:
+        query_tipos = """
+            SELECT tipo_evento, COUNT(*) as cantidad
+            FROM registros_asistencia
+            WHERE fecha BETWEEN ? AND ?
+            GROUP BY tipo_evento
+        """
+        df_tipos = pd.read_sql_query(query_tipos, conn, params=(fecha_inicio, fecha_fin))
     else:
-        cajas = cantidad_clams / 12 if cantidad_clams > 0 else 0
-    st.metric("📦 Cajas a registrar", f"{cajas:.2f}")
-    if merma_kilos > 0 and cantidad_clams > 0:
-        porcentaje_merma = (merma_kilos / cantidad_clams) * 100
-        st.metric("📊 Porcentaje de Merma", f"{porcentaje_merma:.2f}%")
-    st.info(f"👤 Trabajador: **{nombre}**")
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("💾 Guardar Cosecha", type="primary", use_container_width=True):
-            if cantidad_clams <= 0:
-                st.error("Ingrese cantidad válida")
-            elif not invernadero_id and mostrar_invernadero:
-                st.error("Seleccione invernadero")
-            else:
-                data = {
-                    'fecha': fecha_actual, 'dia': dia_espanol, 'semana': get_mexico_week(),
-                    'trabajador_id': int(id_trabajador), 'invernadero_id': invernadero_id,
-                    'tipo_cosecha': tipo_cosecha, 'calidad': calidad, 'presentacion': presentacion,
-                    'cantidad_clams': float(cantidad_clams), 'merma_kilos': float(merma_kilos)
-                }
-                success, msg = guardar_cosecha(data)
-                if success:
-                    st.success(msg)
-                    st.balloons()
-                    st.session_state.show_form = False
-                    st.session_state.scanned_worker = None
-                    st.rerun()
-                else:
-                    st.error(msg)
-    with col2:
-        if st.button("🔄 Escanear otro", use_container_width=True):
-            st.session_state.show_form = False
-            st.session_state.scanned_worker = None
-            st.rerun()
+        df_tipos = pd.DataFrame(columns=['tipo_evento', 'cantidad'])
+    
+    # Consulta corregida para horas trabajadas
+    query_horas = """
+        SELECT 
+            t.nombre || ' ' || t.apellido_paterno as trabajador,
+            AVG(
+                (strftime('%s', hora_salida) - strftime('%s', hora_entrada) - 
+                 CASE 
+                     WHEN hora_entrada_comida IS NOT NULL AND hora_salida_comida IS NOT NULL
+                     THEN (strftime('%s', hora_entrada_comida) - strftime('%s', hora_salida_comida))
+                     ELSE 0
+                 END
+                ) / 3600.0
+            ) as horas_promedio
+        FROM asistencia a
+        LEFT JOIN trabajadores t ON a.trabajador_id = t.id
+        WHERE a.fecha BETWEEN ? AND ? 
+        AND a.hora_entrada IS NOT NULL 
+        AND a.hora_salida IS NOT NULL
+        GROUP BY a.trabajador_id
+    """
+    df_horas = pd.read_sql_query(query_horas, conn, params=(fecha_inicio, fecha_fin))
+    
+    query_tiempo_invernadero = """
+        SELECT 
+            i.nombre as invernadero,
+            AVG(CAST((strftime('%s', hora_salida) - strftime('%s', hora_entrada)) / 3600.0 AS REAL)) as horas_promedio,
+            COUNT(*) as visitas
+        FROM asistencia a
+        LEFT JOIN invernaderos i ON a.invernadero_id = i.id
+        WHERE a.fecha BETWEEN ? AND ?
+        AND a.hora_entrada IS NOT NULL 
+        AND a.hora_salida IS NOT NULL
+        GROUP BY i.nombre
+    """
+    df_tiempo_invernadero = pd.read_sql_query(query_tiempo_invernadero, conn, params=(fecha_inicio, fecha_fin))
+    
+    query_tiempo_comida = """
+        SELECT 
+            t.nombre || ' ' || t.apellido_paterno as trabajador,
+            AVG(CAST((strftime('%s', hora_entrada_comida) - strftime('%s', hora_salida_comida)) / 3600.0 AS REAL)) as horas_comida
+        FROM asistencia a
+        LEFT JOIN trabajadores t ON a.trabajador_id = t.id
+        WHERE a.fecha BETWEEN ? AND ?
+        AND a.hora_salida_comida IS NOT NULL 
+        AND a.hora_entrada_comida IS NOT NULL
+        GROUP BY a.trabajador_id
+    """
+    df_tiempo_comida = pd.read_sql_query(query_tiempo_comida, conn, params=(fecha_inicio, fecha_fin))
+    
+    query_diaria = """
+        SELECT 
+            fecha,
+            COUNT(DISTINCT trabajador_id) as total_trabajadores,
+            COUNT(CASE WHEN hora_entrada IS NOT NULL THEN 1 END) as registraron_entrada,
+            COUNT(CASE WHEN hora_salida IS NOT NULL THEN 1 END) as registraron_salida
+        FROM asistencia
+        WHERE fecha BETWEEN ? AND ?
+        GROUP BY fecha
+        ORDER BY fecha
+    """
+    df_diaria = pd.read_sql_query(query_diaria, conn, params=(fecha_inicio, fecha_fin))
+    
+    query_faltas = """
+        SELECT 
+            t.id,
+            t.nombre || ' ' || t.apellido_paterno as trabajador,
+            COUNT(CASE WHEN a.hora_entrada IS NULL AND d.tipo_descanso IS NULL THEN 1 END) as faltas,
+            COUNT(CASE WHEN d.tipo_descanso IS NOT NULL THEN 1 END) as descansos
+        FROM trabajadores t
+        LEFT JOIN asistencia a ON t.id = a.trabajador_id AND a.fecha BETWEEN ? AND ?
+        LEFT JOIN descansos d ON t.id = d.trabajador_id AND d.fecha BETWEEN ? AND ?
+        WHERE t.estatus = 'activo'
+        GROUP BY t.id
+    """
+    df_faltas = pd.read_sql_query(query_faltas, conn, params=(fecha_inicio, fecha_fin, fecha_inicio, fecha_fin))
+    
+    conn.close()
+    
+    return {
+        'registros_por_tipo': df_tipos,
+        'horas_promedio': df_horas,
+        'tiempo_invernadero': df_tiempo_invernadero,
+        'tiempo_comida': df_tiempo_comida,
+        'asistencia_diaria': df_diaria,
+        'faltas_descansos': df_faltas
+    }
 
-def mostrar_formulario_asistencia_instant(id_trabajador, nombre):
-    st.markdown("### 📋 Registrar Asistencia")
-    invernaderos = get_invernaderos_usuario()  # Usar solo invernaderos asignados
-    if invernaderos:
-        invernadero = st.selectbox("🏭 Invernadero:", invernaderos, format_func=lambda x: f"{x[1]} - {x[2]}", key="invernadero_asistencia_instant")
-        invernadero_id = invernadero[0]
+# ==========================================
+# FUNCIONES DE COSECHA Y ENVÍOS
+# ==========================================
+
+def guardar_cosecha(data):
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            INSERT INTO cosechas
+            (fecha, dia, semana, trabajador_id, modulo, tipo_cosecha,
+             calidad, presentacion, cantidad_clams, numero_cajas)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (data['fecha'], data['dia'], data['semana'], data['trabajador_id'],
+              data['modulo'], data['tipo_cosecha'], data['calidad'],
+              data['presentacion'], data['cantidad_clams'], data['numero_cajas']))
+        
+        conn.commit()
+        conn.close()
+        return True, "✅ Cosecha registrada correctamente"
+    except Exception as e:
+        return False, f"❌ Error al guardar: {str(e)}"
+
+def get_cosechas(fecha_inicio=None, fecha_fin=None):
+    conn = sqlite3.connect(DB_PATH)
+    
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA table_info(cosechas)")
+    columns = cursor.fetchall()
+    column_names = [col[1] for col in columns]
+    tiene_cajas_enviadas = 'cajas_enviadas' in column_names
+    
+    if tiene_cajas_enviadas:
+        query = """
+            SELECT c.*, 
+                   t.nombre || ' ' || t.apellido_paterno as trabajador_nombre,
+                   (c.numero_cajas - c.cajas_enviadas) as cajas_disponibles
+            FROM cosechas c
+            LEFT JOIN trabajadores t ON c.trabajador_id = t.id
+            WHERE 1=1
+        """
     else:
-        invernadero_id = None
-        st.warning("No tienes invernaderos asignados para hoy")
-    tipo_evento = st.selectbox("📌 Evento:", ["entrada_invernadero", "salida_comer", "regreso_comida", "salida_invernadero"], format_func=lambda x: {'entrada_invernadero': '🚪 Entrada a Invernadero', 'salida_comer': '🍽️ Salida a Comer', 'regreso_comida': '✅ Regreso de Comida', 'salida_invernadero': '🚪 Salida de Invernadero'}[x], key="tipo_instant")
-    st.info(f"👤 Trabajador: **{nombre}**")
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("✅ Registrar", type="primary", use_container_width=True):
-            if tipo_evento == 'entrada_invernadero' and not invernadero_id:
-                st.error("Seleccione invernadero")
-            else:
-                success, msg = registrar_evento_asistencia(int(id_trabajador), invernadero_id if tipo_evento == 'entrada_invernadero' else None, tipo_evento)
-                if success:
-                    st.success(msg)
-                    st.balloons()
-                    st.session_state.show_form = False
-                    st.session_state.scanned_worker = None
-                    st.rerun()
-                else:
-                    st.error(msg)
-    with col2:
-        if st.button("🔄 Escanear otro", use_container_width=True):
-            st.session_state.show_form = False
-            st.session_state.scanned_worker = None
-            st.rerun()
+        query = """
+            SELECT c.*, 
+                   t.nombre || ' ' || t.apellido_paterno as trabajador_nombre,
+                   c.numero_cajas as cajas_disponibles
+            FROM cosechas c
+            LEFT JOIN trabajadores t ON c.trabajador_id = t.id
+            WHERE 1=1
+        """
+    
+    params = []
+    
+    if fecha_inicio:
+        query += " AND c.fecha >= ?"
+        params.append(fecha_inicio)
+    if fecha_fin:
+        query += " AND c.fecha <= ?"
+        params.append(fecha_fin)
+    
+    query += " ORDER BY c.fecha DESC, c.id DESC"
+    
+    try:
+        df = pd.read_sql_query(query, conn, params=params if params else None)
+    except Exception:
+        query_simple = """
+            SELECT c.*, 
+                   t.nombre || ' ' || t.apellido_paterno as trabajador_nombre
+            FROM cosechas c
+            LEFT JOIN trabajadores t ON c.trabajador_id = t.id
+            WHERE 1=1
+        """
+        if fecha_inicio:
+            query_simple += " AND c.fecha >= ?"
+        if fecha_fin:
+            query_simple += " AND c.fecha <= ?"
+        query_simple += " ORDER BY c.fecha DESC, c.id DESC"
+        
+        df = pd.read_sql_query(query_simple, conn, params=params if params else None)
+        df['cajas_disponibles'] = df['numero_cajas']
+    
+    conn.close()
+    return df
 
-# ==========================================
-# FUNCIONES DE DASHBOARD Y REPORTES
-# ==========================================
+def registrar_envio_enfriado(invernadero_id, cantidad_cajas, trabajador_envia_id, trabajador_recibe_id, tipo_envio, presentacion, lote, observaciones):
+    """Registra un envío a enfriado con todos los detalles"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        fecha_actual = datetime.now().date()
+        hora_actual = datetime.now().time()
+        
+        # Registrar el envío
+        cursor.execute("""
+            INSERT INTO envios_enfriado
+            (fecha, hora, invernadero_id, trabajador_envia_id, trabajador_recibe_id, 
+             tipo_envio, presentacion, cantidad_cajas, lote, observaciones)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (fecha_actual, hora_actual, invernadero_id, trabajador_envia_id, trabajador_recibe_id,
+              tipo_envio, presentacion, cantidad_cajas, lote, observaciones))
+        
+        # Restar cajas del inventario de cosechas
+        cursor.execute("PRAGMA table_info(cosechas)")
+        columns = cursor.fetchall()
+        column_names = [col[1] for col in columns]
+        tiene_cajas_enviadas = 'cajas_enviadas' in column_names
+        
+        if tiene_cajas_enviadas:
+            cursor.execute("""
+                SELECT id, numero_cajas, cajas_enviadas
+                FROM cosechas
+                WHERE fecha <= ? AND (numero_cajas - cajas_enviadas) > 0
+                ORDER BY fecha ASC
+            """, (fecha_actual,))
+            
+            cosechas = cursor.fetchall()
+            cajas_restantes = cantidad_cajas
+            
+            for cosecha_id, total_cajas, enviadas in cosechas:
+                disponibles = total_cajas - enviadas
+                if disponibles > 0:
+                    a_descontar = min(disponibles, cajas_restantes)
+                    nuevas_enviadas = enviadas + a_descontar
+                    cursor.execute("""
+                        UPDATE cosechas
+                        SET cajas_enviadas = ?
+                        WHERE id = ?
+                    """, (nuevas_enviadas, cosecha_id))
+                    cajas_restantes -= a_descontar
+                    if cajas_restantes <= 0:
+                        break
+        
+        conn.commit()
+        conn.close()
+        
+        if tiene_cajas_enviadas and cajas_restantes > 0:
+            return True, f"⚠️ Advertencia: Solo se encontraron {cantidad_cajas - cajas_restantes} cajas disponibles. Faltan {cajas_restantes} cajas por registrar en cosechas."
+        
+        return True, "✅ Envío registrado correctamente"
+        
+    except Exception as e:
+        return False, f"❌ Error al registrar: {str(e)}"
+
+def get_envios_enfriado(fecha_inicio=None, fecha_fin=None, invernadero_id=None):
+    """Obtiene registros de envíos con filtros"""
+    conn = sqlite3.connect(DB_PATH)
+    query = """
+        SELECT e.*,
+               i.nombre as invernadero,
+               te.nombre || ' ' || te.apellido_paterno as trabajador_envia,
+               tr.nombre || ' ' || tr.apellido_paterno as trabajador_recibe
+        FROM envios_enfriado e
+        LEFT JOIN invernaderos i ON e.invernadero_id = i.id
+        LEFT JOIN trabajadores te ON e.trabajador_envia_id = te.id
+        LEFT JOIN trabajadores tr ON e.trabajador_recibe_id = tr.id
+        WHERE 1=1
+    """
+    params = []
+    
+    if fecha_inicio:
+        query += " AND e.fecha >= ?"
+        params.append(fecha_inicio)
+    if fecha_fin:
+        query += " AND e.fecha <= ?"
+        params.append(fecha_fin)
+    if invernadero_id:
+        query += " AND e.invernadero_id = ?"
+        params.append(invernadero_id)
+    
+    query += " ORDER BY e.fecha DESC, e.hora DESC"
+    
+    df = pd.read_sql_query(query, conn, params=params if params else None)
+    conn.close()
+    return df
+
+def get_stats_envios_avanzado(fecha_inicio=None, fecha_fin=None):
+    """Obtiene estadísticas avanzadas de envíos"""
+    conn = sqlite3.connect(DB_PATH)
+    
+    if not fecha_inicio:
+        fecha_inicio = datetime.now().date() - timedelta(days=30)
+    if not fecha_fin:
+        fecha_fin = datetime.now().date()
+    
+    # Totales generales
+    total_cajas = pd.read_sql_query("""
+        SELECT SUM(cantidad_cajas) as total 
+        FROM envios_enfriado 
+        WHERE fecha BETWEEN ? AND ?
+    """, conn, params=(fecha_inicio, fecha_fin))['total'][0] or 0
+    
+    # Envíos por invernadero y tipo
+    envios_por_invernadero = pd.read_sql_query("""
+        SELECT 
+            i.nombre as invernadero,
+            e.tipo_envio,
+            e.presentacion,
+            SUM(e.cantidad_cajas) as cajas_enviadas,
+            COUNT(*) as numero_envios
+        FROM envios_enfriado e
+        LEFT JOIN invernaderos i ON e.invernadero_id = i.id
+        WHERE e.fecha BETWEEN ? AND ?
+        GROUP BY i.nombre, e.tipo_envio, e.presentacion
+        ORDER BY cajas_enviadas DESC
+    """, conn, params=(fecha_inicio, fecha_fin))
+    
+    # Envíos por día
+    envios_diarios = pd.read_sql_query("""
+        SELECT 
+            fecha,
+            SUM(cantidad_cajas) as cajas,
+            COUNT(*) as envios,
+            SUM(CASE WHEN tipo_envio = 'Nacional' THEN cantidad_cajas ELSE 0 END) as nacional,
+            SUM(CASE WHEN tipo_envio = 'Exportación' THEN cantidad_cajas ELSE 0 END) as exportacion
+        FROM envios_enfriado
+        WHERE fecha BETWEEN ? AND ?
+        GROUP BY fecha
+        ORDER BY fecha
+    """, conn, params=(fecha_inicio, fecha_fin))
+    
+    # Top trabajadores que envían
+    top_trabajadores_envian = pd.read_sql_query("""
+        SELECT 
+            t.nombre || ' ' || t.apellido_paterno as trabajador,
+            COUNT(*) as numero_envios,
+            SUM(e.cantidad_cajas) as cajas_enviadas
+        FROM envios_enfriado e
+        LEFT JOIN trabajadores t ON e.trabajador_envia_id = t.id
+        WHERE e.fecha BETWEEN ? AND ?
+        GROUP BY t.id
+        ORDER BY cajas_enviadas DESC
+        LIMIT 10
+    """, conn, params=(fecha_inicio, fecha_fin))
+    
+    # Top trabajadores que reciben
+    top_trabajadores_reciben = pd.read_sql_query("""
+        SELECT 
+            t.nombre || ' ' || t.apellido_paterno as trabajador,
+            COUNT(*) as numero_envios,
+            SUM(e.cantidad_cajas) as cajas_recibidas
+        FROM envios_enfriado e
+        LEFT JOIN trabajadores t ON e.trabajador_recibe_id = t.id
+        WHERE e.fecha BETWEEN ? AND ?
+        GROUP BY t.id
+        ORDER BY cajas_recibidas DESC
+        LIMIT 10
+    """, conn, params=(fecha_inicio, fecha_fin))
+    
+    # Resumen por presentación
+    resumen_presentacion = pd.read_sql_query("""
+        SELECT 
+            presentacion,
+            SUM(cantidad_cajas) as cajas,
+            COUNT(*) as envios
+        FROM envios_enfriado
+        WHERE fecha BETWEEN ? AND ?
+        GROUP BY presentacion
+    """, conn, params=(fecha_inicio, fecha_fin))
+    
+    conn.close()
+    
+    return {
+        'total_cajas': total_cajas,
+        'envios_por_invernadero': envios_por_invernadero,
+        'envios_diarios': envios_diarios,
+        'top_trabajadores_envian': top_trabajadores_envian,
+        'top_trabajadores_reciben': top_trabajadores_reciben,
+        'resumen_presentacion': resumen_presentacion
+    }
+
+def get_stats_cosecha():
+    conn = sqlite3.connect(DB_PATH)
+    
+    total_cosechas = pd.read_sql_query("SELECT COUNT(*) as total FROM cosechas", conn)['total'][0]
+    total_clams = pd.read_sql_query("SELECT SUM(cantidad_clams) as total FROM cosechas", conn)['total'][0]
+    total_cajas = pd.read_sql_query("SELECT SUM(numero_cajas) as total FROM cosechas", conn)['total'][0]
+    
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA table_info(cosechas)")
+    columns = cursor.fetchall()
+    column_names = [col[1] for col in columns]
+    tiene_cajas_enviadas = 'cajas_enviadas' in column_names
+    
+    if tiene_cajas_enviadas:
+        cajas_enviadas = pd.read_sql_query("SELECT SUM(cajas_enviadas) as total FROM cosechas", conn)['total'][0] or 0
+    else:
+        cajas_enviadas = 0
+    
+    cosechas_por_tipo = pd.read_sql_query("""
+        SELECT tipo_cosecha, COUNT(*) as cantidad, SUM(cantidad_clams) as clams
+        FROM cosechas 
+        GROUP BY tipo_cosecha
+    """, conn)
+    
+    conn.close()
+    
+    return {
+        'total_cosechas': total_cosechas or 0,
+        'total_clams': total_clams or 0,
+        'total_cajas': total_cajas or 0,
+        'cajas_enviadas': cajas_enviadas,
+        'cajas_disponibles': (total_cajas or 0) - (cajas_enviadas or 0),
+        'cosechas_por_tipo': cosechas_por_tipo
+    }
 
 def get_dashboard_stats():
-    try:
-        activos_result = supabase.table('trabajadores').select('id', count='exact').eq('estatus', 'activo').execute()
-        total_activos = activos_result.count if activos_result.count else 0
-        bajas_result = supabase.table('trabajadores').select('id', count='exact').eq('estatus', 'baja').execute()
-        total_bajas = bajas_result.count if bajas_result.count else 0
-        inicio_mes = get_mexico_date().replace(day=1)
-        ingresos_result = supabase.table('trabajadores').select('id', count='exact').gte('fecha_alta', inicio_mes.isoformat()).execute()
-        ingresos_mes = ingresos_result.count if ingresos_result.count else 0
-        deptos_result = supabase.table('trabajadores').select("departamentos:departamento_id (nombre), id").eq('estatus', 'activo').execute()
-        deptos_dict = {}
-        for row in deptos_result.data:
-            depto_nombre = row['departamentos']['nombre'] if row['departamentos'] else 'Sin asignar'
-            deptos_dict[depto_nombre] = deptos_dict.get(depto_nombre, 0) + 1
-        df_deptos = pd.DataFrame([{'departamento': k, 'cantidad': v} for k, v in deptos_dict.items()])
-        nomina_result = supabase.table('trabajadores').select('tipo_nomina', count='exact').eq('estatus', 'activo').group_by('tipo_nomina').execute()
-        df_nomina = pd.DataFrame(nomina_result.data) if nomina_result.data else pd.DataFrame()
-        return {'total_activos': total_activos, 'total_bajas': total_bajas, 'ingresos_mes': ingresos_mes, 'df_deptos': df_deptos, 'df_nomina': df_nomina}
-    except:
-        return {'total_activos': 0, 'total_bajas': 0, 'ingresos_mes': 0, 'df_deptos': pd.DataFrame(), 'df_nomina': pd.DataFrame()}
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT COUNT(*) FROM trabajadores WHERE estatus = 'activo'")
+    total_activos = cursor.fetchone()[0] or 0
+    
+    cursor.execute("SELECT COUNT(*) FROM trabajadores WHERE estatus = 'baja'")
+    total_bajas = cursor.fetchone()[0] or 0
+    
+    df_deptos = pd.read_sql_query("""
+        SELECT COALESCE(d.nombre, 'Sin asignar') as departamento, COUNT(*) as cantidad 
+        FROM trabajadores t
+        LEFT JOIN departamentos d ON t.departamento_id = d.id
+        WHERE t.estatus = 'activo' 
+        GROUP BY d.nombre
+        ORDER BY cantidad DESC
+    """, conn)
+    
+    df_nomina = pd.read_sql_query("""
+        SELECT tipo_nomina, COUNT(*) as cantidad 
+        FROM trabajadores 
+        WHERE estatus = 'activo' 
+        GROUP BY tipo_nomina
+    """, conn)
+    
+    inicio_mes = datetime.today().replace(day=1)
+    cursor.execute("SELECT COUNT(*) FROM trabajadores WHERE fecha_alta >= ?", (inicio_mes.date(),))
+    ingresos_mes = cursor.fetchone()[0] or 0
+    
+    conn.close()
+    
+    return {
+        'total_activos': total_activos,
+        'total_bajas': total_bajas,
+        'ingresos_mes': ingresos_mes,
+        'df_deptos': df_deptos,
+        'df_nomina': df_nomina
+    }
 
-def get_report_ingresos_semana():
-    hoy = get_mexico_date()
-    inicio_semana = hoy - timedelta(days=hoy.weekday())
-    fin_semana = inicio_semana + timedelta(days=6)
-    try:
-        result = supabase.table('trabajadores').select("""
-            id, nombre, apellido_paterno, apellido_materno, fecha_alta, tipo_nomina,
-            departamentos:departamento_id (nombre), subdepartamentos:subdepartamento_id (nombre), puestos:puesto_id (nombre)
-        """).gte('fecha_alta', inicio_semana.isoformat()).lte('fecha_alta', fin_semana.isoformat()).order('fecha_alta', desc=True).execute()
-        data = [{'id': row['id'], 'nombre': row['nombre'], 'apellido_paterno': row['apellido_paterno'], 'apellido_materno': row['apellido_materno'] or '', 'fecha_alta': row['fecha_alta'], 'departamento': row['departamentos']['nombre'] if row['departamentos'] else 'Sin asignar', 'subdepartamento': row['subdepartamentos']['nombre'] if row['subdepartamentos'] else 'Sin asignar', 'puesto': row['puestos']['nombre'] if row['puestos'] else 'Sin asignar', 'tipo_nomina': row['tipo_nomina']} for row in result.data]
-        return pd.DataFrame(data), inicio_semana, fin_semana
-    except:
-        return pd.DataFrame(), inicio_semana, fin_semana
-
-def get_report_bajas_semana():
-    hoy = get_mexico_date()
-    inicio_semana = hoy - timedelta(days=hoy.weekday())
-    fin_semana = inicio_semana + timedelta(days=6)
-    try:
-        result = supabase.table('trabajadores').select("""
-            id, nombre, apellido_paterno, apellido_materno, fecha_baja,
-            departamentos:departamento_id (nombre), subdepartamentos:subdepartamento_id (nombre), puestos:puesto_id (nombre)
-        """).gte('fecha_baja', inicio_semana.isoformat()).lte('fecha_baja', fin_semana.isoformat()).order('fecha_baja', desc=True).execute()
-        data = [{'id': row['id'], 'nombre': row['nombre'], 'apellido_paterno': row['apellido_paterno'], 'apellido_materno': row['apellido_materno'] or '', 'fecha_baja': row['fecha_baja'], 'departamento': row['departamentos']['nombre'] if row['departamentos'] else 'Sin asignar', 'subdepartamento': row['subdepartamentos']['nombre'] if row['subdepartamentos'] else 'Sin asignar', 'puesto': row['puestos']['nombre'] if row['puestos'] else 'Sin asignar'} for row in result.data]
-        return pd.DataFrame(data), inicio_semana, fin_semana
-    except:
-        return pd.DataFrame(), inicio_semana, fin_semana
-
-def get_report_nomina_activa(depto_nombre=None, subdepto_nombre=None):
-    try:
-        query = supabase.table('trabajadores').select("""
-            id, nombre, apellido_paterno, apellido_materno, telefono, correo, fecha_alta, tipo_nomina,
-            departamentos:departamento_id (nombre), subdepartamentos:subdepartamento_id (nombre), puestos:puesto_id (nombre)
-        """).eq('estatus', 'activo')
-        if depto_nombre and depto_nombre != "Todos":
-            query = query.eq('departamentos.nombre', depto_nombre)
-        if subdepto_nombre and subdepto_nombre != "Todos":
-            query = query.eq('subdepartamentos.nombre', subdepto_nombre)
-        result = query.order('apellido_paterno').execute()
-        data = [{'id': row['id'], 'nombre': row['nombre'], 'apellido_paterno': row['apellido_paterno'], 'apellido_materno': row['apellido_materno'] or '', 'departamento': row['departamentos']['nombre'] if row['departamentos'] else 'Sin asignar', 'subdepartamento': row['subdepartamentos']['nombre'] if row['subdepartamentos'] else 'Sin asignar', 'puesto': row['puestos']['nombre'] if row['puestos'] else 'Sin asignar', 'tipo_nomina': row['tipo_nomina'], 'fecha_alta': row['fecha_alta'], 'telefono': row['telefono'] or '', 'correo': row['correo'] or ''} for row in result.data]
-        df = pd.DataFrame(data)
-        resumen = df.groupby('departamento').size().reset_index(name='cantidad') if not df.empty else pd.DataFrame(columns=['departamento', 'cantidad'])
-        return df, resumen
-    except:
-        return pd.DataFrame(), pd.DataFrame()
+def export_to_excel(df, sheet_name="Datos"):
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name=sheet_name)
+    output.seek(0)
+    return output
 
 # ==========================================
-# FUNCIONES DE GESTIÓN DE USUARIOS (ACTUALIZADA)
+# FUNCIONES DE QR
 # ==========================================
 
-def get_all_users():
-    try:
-        result = supabase.table('perfiles_usuario').select('*').execute()
-        return pd.DataFrame(result.data) if result.data else pd.DataFrame()
-    except:
-        return pd.DataFrame()
+def generar_qr_trabajador(trabajador_id):
+    trabajador = get_worker_by_id(trabajador_id)
+    if not trabajador:
+        return None, None
+    
+    contenido = f"{trabajador['id']}|{trabajador['nombre']} {trabajador['apellido_paterno']}|{trabajador['puesto_nombre']}"
+    
+    if not os.path.exists('qr_codes'):
+        os.makedirs('qr_codes')
+    
+    qr = qrcode.QRCode(
+        version=1,
+        error_correction=qrcode.constants.ERROR_CORRECT_L,
+        box_size=10,
+        border=4,
+    )
+    qr.add_data(contenido)
+    qr.make(fit=True)
+    
+    img = qr.make_image(fill_color="black", back_color="white")
+    nombre_archivo = f"qr_codes/trabajador_{trabajador['id']}.png"
+    img.save(nombre_archivo)
+    
+    return nombre_archivo, contenido
 
-def update_user_permissions(user_id, rol, permisos, invernaderos_asignados):
-    try:
-        supabase.table('perfiles_usuario').update({'rol': rol, 'permisos': permisos, 'invernaderos_asignados': invernaderos_asignados}).eq('id', user_id).execute()
-        invalidar_cache()
-        return True, "✅ Permisos actualizados correctamente"
-    except Exception as e:
-        return False, f"❌ Error: {str(e)}"
-
-def update_system_config(clave, valor):
-    try:
-        supabase.table('configuracion_sistema').update({'valor': valor}).eq('clave', clave).execute()
-        invalidar_cache()
-        return True
-    except:
-        return False
-
-def mostrar_gestion_usuarios():
-    st.header("👥 Gestión de Usuarios y Permisos")
+def generar_qr_masivo(trabajadores_ids):
+    generados = []
+    carpeta = 'qr_codes/masivos'
+    if not os.path.exists(carpeta):
+        os.makedirs(carpeta)
     
-    if st.session_state.get('user_rol') != 'admin':
-        st.error("❌ No tienes permiso para acceder a esta sección")
-        return
-    
-    tab1, tab2, tab3 = st.tabs(["📋 Usuarios y Permisos", "📅 Asignación por Día", "📊 Historial Asignaciones"])
-    
-    with tab1:
-        usuarios = get_all_users()
-        if not usuarios.empty:
-            for _, usuario in usuarios.iterrows():
-                with st.expander(f"👤 {usuario['nombre']} - {usuario['email']} ({usuario['rol']})"):
-                    col1, col2 = st.columns(2)
-                    
-                    with col1:
-                        st.subheader("⚙️ Configuración General")
-                        nuevo_rol = st.selectbox("Rol", ["admin", "supervisor"], index=0 if usuario['rol'] == 'admin' else 1, key=f"rol_{usuario['id']}")
-                        
-                        invernaderos = get_all_invernaderos()
-                        invernaderos_asignados_actuales = usuario.get('invernaderos_asignados', [])
-                        invernaderos_asignados = st.multiselect(
-                            "Invernaderos asignados (base)", 
-                            [inv[1] for inv in invernaderos], 
-                            default=[inv[1] for inv in invernaderos if inv[0] in invernaderos_asignados_actuales],
-                            key=f"inv_base_{usuario['id']}"
-                        )
-                        invernaderos_ids_base = [inv[0] for inv in invernaderos if inv[1] in invernaderos_asignados]
-                    
-                    with col2:
-                        st.subheader("📱 Permisos por Módulo")
-                        permisos_actuales = usuario.get('permisos', {})
-                        
-                        modulos_por_categoria = {
-                            "📊 Producción": ["registro_cosecha", "avance_cosecha", "traslado_camara_fria", "gestion_merma", "cajas_mesa"],
-                            "👥 Personal": ["control_asistencia", "gestion_personal", "reportes"],
-                            "📈 Planificación": ["proyecciones", "dashboard"],
-                            "🔧 Administración": ["gestion_invernaderos", "catalogos", "generar_qr", "registros_qr"],
-                            "⚙️ Sistema": ["gestion_usuarios", "cierre_dia"]
-                        }
-                        
-                        nuevos_permisos = {}
-                        for categoria, modulos in modulos_por_categoria.items():
-                            st.markdown(f"**{categoria}**")
-                            for modulo in modulos:
-                                label = {
-                                    "registro_cosecha": "🌾 Registro Cosecha",
-                                    "avance_cosecha": "📊 Avance Cosecha",
-                                    "traslado_camara_fria": "❄️ Traslado a Cámara Fría",
-                                    "gestion_merma": "🗑️ Gestión Merma",
-                                    "cajas_mesa": "📦 Cajas en Mesa",
-                                    "control_asistencia": "🕐 Control Asistencia",
-                                    "gestion_personal": "👥 Gestión Personal",
-                                    "reportes": "📋 Reportes",
-                                    "proyecciones": "📈 Proyecciones",
-                                    "dashboard": "📊 Dashboard",
-                                    "gestion_invernaderos": "🏭 Gestión Invernaderos",
-                                    "catalogos": "📚 Catálogos",
-                                    "generar_qr": "📱 Generar QR",
-                                    "registros_qr": "📊 Registros QR",
-                                    "gestion_usuarios": "👥 Gestión Usuarios",
-                                    "cierre_dia": "🔒 Cierre de Día"
-                                }.get(modulo, modulo)
-                                
-                                nuevos_permisos[modulo] = st.checkbox(
-                                    label, 
-                                    value=permisos_actuales.get(modulo, False), 
-                                    key=f"perm_{usuario['id']}_{modulo}"
-                                )
-                            st.markdown("---")
-                    
-                    if st.button("💾 Guardar Cambios", key=f"save_{usuario['id']}"):
-                        success, msg = update_user_permissions(usuario['id'], nuevo_rol, nuevos_permisos, invernaderos_ids_base)
-                        if success:
-                            st.success(msg)
-                            st.rerun()
-                        else:
-                            st.error(msg)
-        else:
-            st.info("No hay usuarios registrados")
-    
-    with tab2:
-        st.subheader("📅 Asignación de Invernaderos por Día")
-        st.markdown("""
-        <div style="background-color: #e3f2fd; padding: 15px; border-radius: 10px; margin-bottom: 20px;">
-            <strong>📌 Instrucciones:</strong><br>
-            • Selecciona un supervisor y una fecha específica<br>
-            • Asigna los invernaderos que podrá usar SOLO en ese día<br>
-            • Esto es útil para cambios temporales o coberturas
-        </div>
-        """, unsafe_allow_html=True)
-        
-        usuarios_df = get_all_users()
-        supervisores = usuarios_df[usuarios_df['rol'] == 'supervisor'] if not usuarios_df.empty else pd.DataFrame()
-        
-        if not supervisores.empty:
-            supervisor_seleccionado = st.selectbox(
-                "Seleccionar Supervisor", 
-                supervisores.apply(lambda x: f"{x['id']} - {x['nombre']} ({x['email']})", axis=1).tolist(),
-                key="asignacion_supervisor"
+    for tid in trabajadores_ids:
+        trabajador = get_worker_by_id(tid)
+        if trabajador:
+            contenido = f"{trabajador['id']}|{trabajador['nombre']} {trabajador['apellido_paterno']}|{trabajador['puesto_nombre']}"
+            
+            qr = qrcode.QRCode(
+                version=1,
+                error_correction=qrcode.constants.ERROR_CORRECT_L,
+                box_size=10,
+                border=4,
             )
-            supervisor_id = supervisor_seleccionado.split(' - ')[0] if supervisor_seleccionado else None
+            qr.add_data(contenido)
+            qr.make(fit=True)
             
-            fecha_asignacion = st.date_input("Fecha de asignación", get_mexico_date(), key="fecha_asignacion")
-            
-            if supervisor_id:
-                asignaciones_actuales = get_invernaderos_asignados_dia(supervisor_id, fecha_asignacion)
-                st.info(f"📌 Asignaciones actuales para {fecha_asignacion}: {len(asignaciones_actuales)} invernaderos")
+            img = qr.make_image(fill_color="black", back_color="white")
+            nombre_archivo = f"{carpeta}/qr_{trabajador['id']}_{trabajador['nombre'].replace(' ', '_')}.png"
+            img.save(nombre_archivo)
+            generados.append(nombre_archivo)
+    
+    return generados
+
+def crear_pdf_qr(archivos_qr, trabajadores_info):
+    try:
+        pdf_nombre = "qr_codes/todos_los_qr.pdf"
+        c = canvas.Canvas(pdf_nombre, pagesize=letter)
+        
+        x_pos = 50
+        y_pos = 750
+        contador = 0
+        
+        for i, (archivo, info) in enumerate(zip(archivos_qr, trabajadores_info)):
+            if os.path.exists(archivo):
+                img = ImageReader(archivo)
+                c.drawImage(img, x_pos, y_pos - 100, width=100, height=100)
                 
-                todos_invernaderos = get_all_invernaderos()
-                invernaderos_disponibles = [f"{inv[1]} - {inv[2]}" for inv in todos_invernaderos]
-                invernaderos_seleccionados = st.multiselect(
-                    "Invernaderos para este día",
-                    invernaderos_disponibles,
-                    default=[f"{inv[1]} - {inv[2]}" for inv in asignaciones_actuales],
-                    key="invernaderos_dia"
+                c.drawString(x_pos, y_pos - 110, f"ID: {info['id']}")
+                c.drawString(x_pos, y_pos - 120, f"Nombre: {info['nombre']}")
+                c.drawString(x_pos, y_pos - 130, f"Puesto: {info['puesto']}")
+                
+                x_pos += 150
+                contador += 1
+                
+                if contador % 4 == 0:
+                    c.showPage()
+                    x_pos = 50
+                    y_pos = 750
+                elif x_pos > 450:
+                    x_pos = 50
+                    y_pos -= 150
+                    
+                    if y_pos < 100:
+                        c.showPage()
+                        x_pos = 50
+                        y_pos = 750
+        
+        c.save()
+        return pdf_nombre
+    except Exception as e:
+        st.error(f"Error al crear PDF: {str(e)}")
+        return None
+
+# ==========================================
+# INTERFAZ DE REGISTRO RÁPIDO CON QR
+# ==========================================
+
+def mostrar_registro_rapido():
+    st.header("📱 Registro Rápido con QR")
+    
+    if 'qr_scaneado' not in st.session_state:
+        st.session_state.qr_scaneado = None
+    if 'trabajador_temp' not in st.session_state:
+        st.session_state.trabajador_temp = None
+    if 'clams_rapido' not in st.session_state:
+        st.session_state.clams_rapido = 0.0
+    if 'cajas_rapido' not in st.session_state:
+        st.session_state.cajas_rapido = 0.0
+    if 'presentacion_rapido' not in st.session_state:
+        st.session_state.presentacion_rapido = "6 oz"
+    
+    def actualizar_cajas_rapido():
+        clams = st.session_state.clams_rapido
+        if st.session_state.presentacion_rapido == "12 oz":
+            st.session_state.cajas_rapido = clams / 12 if clams > 0 else 0
+        else:
+            st.session_state.cajas_rapido = clams / 6 if clams > 0 else 0
+    
+    col1, col2, col3 = st.columns([2, 1, 1])
+    with col1:
+        qr_scan = st.text_input("🔍 Escanea el código QR", 
+                                placeholder="El código aparecerá aquí automáticamente...",
+                                key="qr_scan_input")
+    
+    with col2:
+        if st.button("📷 Limpiar", use_container_width=True):
+            st.session_state.qr_scaneado = None
+            st.session_state.trabajador_temp = None
+            st.session_state.clams_rapido = 0.0
+            st.session_state.cajas_rapido = 0.0
+            st.rerun()
+    
+    if qr_scan and qr_scan != st.session_state.qr_scaneado:
+        st.session_state.qr_scaneado = qr_scan
+        try:
+            partes = qr_scan.split('|')
+            if len(partes) >= 2:
+                trabajador_id = partes[0]
+                trabajador = get_worker_by_id(trabajador_id)
+                if trabajador:
+                    st.session_state.trabajador_temp = trabajador
+                    st.success(f"✅ Trabajador encontrado: {trabajador['nombre']} {trabajador['apellido_paterno']}")
+                else:
+                    st.error("❌ Trabajador no encontrado")
+        except Exception as e:
+            st.error(f"Error: {str(e)}")
+    
+    if st.session_state.trabajador_temp:
+        trabajador = st.session_state.trabajador_temp
+        
+        st.markdown("---")
+        st.subheader("📋 Registrar Evento")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.info(f"""
+            **Trabajador:** {trabajador['nombre']} {trabajador['apellido_paterno']}
+            **ID:** {trabajador['id']}
+            **Puesto:** {trabajador['puesto_nombre']}
+            """)
+        
+        fecha_actual = datetime.now()
+        dias_espanol = {
+            'Monday': 'Lunes', 'Tuesday': 'Martes', 'Wednesday': 'Miércoles',
+            'Thursday': 'Jueves', 'Friday': 'Viernes', 'Saturday': 'Sábado',
+            'Sunday': 'Domingo'
+        }
+        
+        with col2:
+            st.info(f"""
+            **Fecha:** {fecha_actual.strftime('%d/%m/%Y')}
+            **Día:** {dias_espanol[fecha_actual.strftime('%A')]}
+            **Semana:** {fecha_actual.isocalendar()[1]}
+            **Hora:** {fecha_actual.strftime('%H:%M:%S')}
+            """)
+        
+        st.markdown("---")
+        
+        # Controles fuera del formulario
+        invernaderos = get_invernaderos()
+        if invernaderos:
+            invernadero_seleccionado = st.selectbox(
+                "🌱 Seleccionar Invernadero:",
+                invernaderos,
+                format_func=lambda x: f"{x[1]} - {x[2]}",
+                key="invernadero_select"
+            )
+            invernadero_id = invernadero_seleccionado[0]
+        else:
+            st.error("No hay invernaderos registrados")
+            invernadero_id = None
+        
+        modulo = st.selectbox("🔢 Módulo:", list(range(1, 12)), help="Selecciona el módulo de trabajo", key="modulo_select")
+        
+        tipo_evento = st.selectbox(
+            "📌 Tipo de Evento:",
+            ["entrada_invernadero", "salida_comer", "regreso_comida", "salida_invernadero"],
+            format_func=lambda x: {
+                'entrada_invernadero': '🚪 Entrada al Invernadero',
+                'salida_comer': '🍽️ Salida a Comer',
+                'regreso_comida': '✅ Regreso de Comida',
+                'salida_invernadero': '🚪 Salida del Invernadero'
+            }[x],
+            key="tipo_evento_select"
+        )
+        
+        if tipo_evento == 'entrada_invernadero':
+            st.markdown("---")
+            st.subheader("📊 Datos de Cosecha")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                tipo_cosecha = st.selectbox("Tipo de Cosecha:", ["Nacional", "Exportación"], key="tipo_cosecha_rapido")
+                
+                if tipo_cosecha == "Nacional":
+                    calidad = st.selectbox("Calidad:", ["Salmon", "Sobretono"])
+                else:
+                    calidad = None
+            
+            with col2:
+                if tipo_cosecha == "Exportación":
+                    presentacion = st.selectbox("Presentación:", ["6 oz", "12 oz"], key="presentacion_rapido_select")
+                    st.session_state.presentacion_rapido = presentacion
+                else:
+                    presentacion = "6 oz"
+                    st.session_state.presentacion_rapido = "6 oz"
+                    st.info("Presentación automática: 6 oz")
+            
+            cantidad_clams = st.number_input(
+                "Cantidad de Clams:", 
+                min_value=0.0, 
+                value=st.session_state.clams_rapido, 
+                step=1.0,
+                key="clams_rapido_input"
+            )
+            st.session_state.clams_rapido = cantidad_clams
+            actualizar_cajas_rapido()
+            
+            st.text_input("Número de Cajas:", value=f"{st.session_state.cajas_rapido:.2f}", disabled=True)
+        
+        st.markdown("---")
+        
+        # Formulario con el botón de enviar
+        with st.form("form_registro_rapido"):
+            st.write("### Confirmar Registro")
+            
+            st.info(f"""
+            **Resumen del registro:**
+            - Trabajador: {trabajador['nombre']} {trabajador['apellido_paterno']}
+            - Evento: {tipo_evento}
+            """)
+            
+            if st.form_submit_button("💾 Registrar Evento", type="primary", use_container_width=True):
+                success, msg = registrar_evento_asistencia(
+                    trabajador['id'],
+                    invernadero_id if tipo_evento == 'entrada_invernadero' else None,
+                    tipo_evento
                 )
                 
-                invernaderos_ids = []
-                for inv_seleccionado in invernaderos_seleccionados:
-                    for inv in todos_invernaderos:
-                        if f"{inv[1]} - {inv[2]}" == inv_seleccionado:
-                            invernaderos_ids.append(inv[0])
-                            break
-                
-                if st.button("✅ Asignar Invernaderos para este Día", type="primary", use_container_width=True):
-                    success, msg = asignar_invernaderos_dia(supervisor_id, invernaderos_ids, fecha_asignacion, st.session_state.get('user_id'))
-                    if success:
-                        st.success(msg)
-                        st.balloons()
-                        st.rerun()
-                    else:
-                        st.error(msg)
-        else:
-            st.warning("No hay supervisores registrados para asignar")
+                if success:
+                    st.success(msg)
+                    
+                    if tipo_evento == 'entrada_invernadero' and 'cantidad_clams' in locals() and cantidad_clams > 0:
+                        data_cosecha = {
+                            'fecha': fecha_actual.date(),
+                            'dia': dias_espanol[fecha_actual.strftime('%A')],
+                            'semana': fecha_actual.isocalendar()[1],
+                            'trabajador_id': trabajador['id'],
+                            'modulo': modulo,
+                            'tipo_cosecha': tipo_cosecha,
+                            'calidad': calidad,
+                            'presentacion': st.session_state.presentacion_rapido,
+                            'cantidad_clams': float(st.session_state.clams_rapido),
+                            'numero_cajas': float(st.session_state.cajas_rapido)
+                        }
+                        success2, msg2 = guardar_cosecha(data_cosecha)
+                        if success2:
+                            st.success(msg2)
+                        else:
+                            st.error(msg2)
+                    
+                    st.balloons()
+                    st.session_state.qr_scaneado = None
+                    st.session_state.trabajador_temp = None
+                    st.session_state.clams_rapido = 0.0
+                    st.session_state.cajas_rapido = 0.0
+                    st.rerun()
+                else:
+                    st.error(msg)
+
+# ==========================================
+# INTERFAZ DE ENVÍOS A ENFRIADO
+# ==========================================
+
+def mostrar_envios_enfriado():
+    st.header("❄️ Gestión de Envíos a Enfriado")
+    
+    tab1, tab2, tab3 = st.tabs(["📦 Registrar Envío", "📊 Dashboard Envíos", "📋 Historial"])
+    
+    with tab1:
+        st.subheader("Registrar Envío de Cajas a Enfriado")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            invernaderos = get_invernaderos()
+            if invernaderos:
+                invernadero_seleccionado = st.selectbox(
+                    "🏭 Invernadero de origen:",
+                    invernaderos,
+                    format_func=lambda x: f"{x[1]} - {x[2]}",
+                    key="invernadero_envio"
+                )
+                invernadero_id = invernadero_seleccionado[0]
+            else:
+                st.error("No hay invernaderos registrados")
+                invernadero_id = None
+        
+        with col2:
+            if invernadero_id:
+                try:
+                    cosechas = get_cosechas()
+                    if not cosechas.empty:
+                        conn = sqlite3.connect(DB_PATH)
+                        query = """
+                            SELECT SUM(c.numero_cajas - c.cajas_enviadas) as disponibles
+                            FROM cosechas c
+                            LEFT JOIN asistencia a ON c.trabajador_id = a.trabajador_id AND c.fecha = a.fecha
+                            WHERE a.invernadero_id = ?
+                        """
+                        disponibles = pd.read_sql_query(query, conn, params=(invernadero_id,))['disponibles'][0] or 0
+                        conn.close()
+                        st.info(f"📦 Cajas disponibles en {invernadero_seleccionado[1]}: {disponibles:.0f}")
+                except:
+                    pass
+        
+        st.markdown("---")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("👤 Quién entrega las cajas")
+            trabajadores = get_all_workers()
+            if not trabajadores.empty:
+                trabajador_envia = st.selectbox(
+                    "Trabajador que entrega:",
+                    trabajadores.apply(lambda x: f"{x['id']} - {x['nombre']} {x['apellido_paterno']} ({x['puesto']})", axis=1),
+                    key="trabajador_envia"
+                )
+                trabajador_envia_id = int(trabajador_envia.split(' - ')[0]) if trabajador_envia else None
+            else:
+                trabajador_envia_id = None
+        
+        with col2:
+            st.subheader("👤 Quién recibe en cámara fría")
+            if not trabajadores.empty:
+                trabajador_recibe = st.selectbox(
+                    "Trabajador que recibe:",
+                    trabajadores.apply(lambda x: f"{x['id']} - {x['nombre']} {x['apellido_paterno']} ({x['puesto']})", axis=1),
+                    key="trabajador_recibe"
+                )
+                trabajador_recibe_id = int(trabajador_recibe.split(' - ')[0]) if trabajador_recibe else None
+            else:
+                trabajador_recibe_id = None
+        
+        st.markdown("---")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            tipo_envio = st.selectbox(
+                "📦 Tipo de Envío:",
+                ["Nacional", "Exportación"],
+                help="Selecciona si las cajas son para mercado nacional o exportación",
+                key="tipo_envio_select"
+            )
+        
+        with col2:
+            presentacion = st.selectbox(
+                "📏 Presentación:",
+                ["6 oz", "12 oz"],
+                help="Tamaño de las cajas",
+                key="presentacion_envio"
+            )
+        
+        cantidad_cajas = st.number_input("📊 Cantidad de Cajas a enviar:", min_value=0.0, step=1.0, key="cantidad_envio")
+        lote = st.text_input("🏷️ Número de Lote (opcional):", placeholder="Ej: L-2024-001", key="lote_envio")
+        observaciones = st.text_area("📝 Observaciones:", placeholder="Ej: Calidad premium, primera selección, etc.", key="obs_envio")
+        
+        if st.button("✅ Registrar Envío a Enfriado", type="primary", use_container_width=True):
+            if not invernadero_id:
+                st.error("Seleccione un invernadero de origen")
+            elif not trabajador_envia_id:
+                st.error("Seleccione el trabajador que entrega las cajas")
+            elif not trabajador_recibe_id:
+                st.error("Seleccione el trabajador que recibe en cámara fría")
+            elif cantidad_cajas <= 0:
+                st.error("Ingrese una cantidad válida de cajas")
+            else:
+                success, msg = registrar_envio_enfriado(
+                    invernadero_id, cantidad_cajas, trabajador_envia_id, 
+                    trabajador_recibe_id, tipo_envio, presentacion, lote, observaciones
+                )
+                if success:
+                    st.success(msg)
+                    st.balloons()
+                else:
+                    st.error(msg)
+    
+    with tab2:
+        st.subheader("📊 Dashboard de Envíos a Enfriado")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            fecha_inicio = st.date_input("Fecha inicio:", datetime.now().date() - timedelta(days=30), key="envio_inicio")
+        with col2:
+            fecha_fin = st.date_input("Fecha fin:", datetime.now().date(), key="envio_fin")
+        
+        stats_envios = get_stats_envios_avanzado(fecha_inicio, fecha_fin)
+        
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("📦 Total Cajas Enviadas", f"{stats_envios['total_cajas']:,.0f}")
+        with col2:
+            st.metric("🚚 Total Envíos Realizados", len(stats_envios['envios_diarios']) if not stats_envios['envios_diarios'].empty else 0)
+        with col3:
+            promedio_envio = stats_envios['total_cajas'] / max(len(stats_envios['envios_diarios']), 1)
+            st.metric("📊 Promedio por Día", f"{promedio_envio:.1f} cajas")
+        with col4:
+            if not stats_envios['envios_por_invernadero'].empty:
+                top_invernadero = stats_envios['envios_por_invernadero'].iloc[0]['invernadero']
+                st.metric("🏆 Top Invernadero", top_invernadero)
+        
+        st.markdown("---")
+        
+        st.subheader("📅 Evolución de Envíos Diarios")
+        if not stats_envios['envios_diarios'].empty:
+            fig = make_subplots(specs=[[{"secondary_y": True}]])
+            
+            fig.add_trace(
+                go.Bar(x=stats_envios['envios_diarios']['fecha'], 
+                       y=stats_envios['envios_diarios']['cajas'],
+                       name="Cajas Enviadas",
+                       marker_color='#3498db',
+                       opacity=0.7),
+                secondary_y=False
+            )
+            
+            fig.add_trace(
+                go.Scatter(x=stats_envios['envios_diarios']['fecha'], 
+                          y=stats_envios['envios_diarios']['envios'],
+                          name="Número de Envíos",
+                          mode='lines+markers',
+                          line=dict(color='#e74c3c', width=3),
+                          marker=dict(size=8, color='#c0392b')),
+                secondary_y=True
+            )
+            
+            fig.update_layout(
+                title="Evolución de Envíos a Enfriado",
+                xaxis_title="Fecha",
+                hovermode='x unified',
+                plot_bgcolor='rgba(0,0,0,0)',
+                paper_bgcolor='rgba(0,0,0,0)'
+            )
+            fig.update_yaxes(title_text="Cajas Enviadas", secondary_y=False, gridcolor='#ecf0f1')
+            fig.update_yaxes(title_text="Número de Envíos", secondary_y=True, gridcolor='#ecf0f1')
+            
+            st.plotly_chart(fig, use_container_width=True)
+        
+        st.markdown("---")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("📊 Envíos por Invernadero y Tipo")
+            if not stats_envios['envios_por_invernadero'].empty:
+                fig = px.bar(stats_envios['envios_por_invernadero'], 
+                            x='invernadero', y='cajas_enviadas',
+                            color='tipo_envio',
+                            title='Cajas Enviadas por Invernadero',
+                            barmode='group',
+                            color_discrete_map={'Nacional': '#2ecc71', 'Exportación': '#e74c3c'},
+                            text='cajas_enviadas')
+                fig.update_traces(texttemplate='%{text:.0f}', textposition='outside')
+                fig.update_layout(xaxis_tickangle=-45)
+                st.plotly_chart(fig, use_container_width=True)
+        
+        with col2:
+            st.subheader("📊 Distribución por Presentación")
+            if not stats_envios['resumen_presentacion'].empty:
+                fig = px.pie(stats_envios['resumen_presentacion'], 
+                            values='cajas', names='presentacion',
+                            title='Cajas por Presentación',
+                            color_discrete_sequence=['#3498db', '#9b59b6'])
+                fig.update_traces(textposition='inside', textinfo='percent+label')
+                st.plotly_chart(fig, use_container_width=True)
+        
+        st.markdown("---")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("🏆 Top Trabajadores que Entregan")
+            if not stats_envios['top_trabajadores_envian'].empty:
+                fig = px.bar(stats_envios['top_trabajadores_envian'].head(10), 
+                            x='trabajador', y='cajas_enviadas',
+                            title='Top 10 Trabajadores por Cajas Entregadas',
+                            color='cajas_enviadas',
+                            color_continuous_scale='blues',
+                            text='cajas_enviadas')
+                fig.update_traces(texttemplate='%{text:.0f}', textposition='outside')
+                fig.update_layout(xaxis_tickangle=-45)
+                st.plotly_chart(fig, use_container_width=True)
+        
+        with col2:
+            st.subheader("🏆 Top Trabajadores que Reciben")
+            if not stats_envios['top_trabajadores_reciben'].empty:
+                fig = px.bar(stats_envios['top_trabajadores_reciben'].head(10), 
+                            x='trabajador', y='cajas_recibidas',
+                            title='Top 10 Trabajadores por Cajas Recibidas',
+                            color='cajas_recibidas',
+                            color_continuous_scale='greens',
+                            text='cajas_recibidas')
+                fig.update_traces(texttemplate='%{text:.0f}', textposition='outside')
+                fig.update_layout(xaxis_tickangle=-45)
+                st.plotly_chart(fig, use_container_width=True)
+        
+        st.markdown("---")
+        
+        st.subheader("📋 Resumen de Envíos por Invernadero")
+        if not stats_envios['envios_por_invernadero'].empty:
+            pivot_envios = stats_envios['envios_por_invernadero'].pivot_table(
+                index='invernadero', 
+                columns='tipo_envio', 
+                values='cajas_enviadas', 
+                fill_value=0
+            ).reset_index()
+            
+            if 'Nacional' not in pivot_envios.columns:
+                pivot_envios['Nacional'] = 0
+            if 'Exportación' not in pivot_envios.columns:
+                pivot_envios['Exportación'] = 0
+            
+            pivot_envios['Total'] = pivot_envios['Nacional'] + pivot_envios['Exportación']
+            pivot_envios = pivot_envios.sort_values('Total', ascending=False)
+            
+            st.dataframe(pivot_envios, use_container_width=True)
     
     with tab3:
-        st.subheader("📊 Historial de Asignaciones por Día")
+        st.subheader("📋 Historial de Envíos")
         
-        todos_usuarios = get_all_users()
-        if not todos_usuarios.empty:
-            usuario_historial = st.selectbox(
-                "Ver historial de:", 
-                todos_usuarios.apply(lambda x: f"{x['id']} - {x['nombre']} ({x['rol']})", axis=1).tolist(),
-                key="historial_usuario"
-            )
-            usuario_id_hist = usuario_historial.split(' - ')[0] if usuario_historial else None
-            
-            if usuario_id_hist:
-                col1, col2 = st.columns(2)
-                with col1:
-                    fecha_hist_inicio = st.date_input("Fecha inicio", get_mexico_date() - timedelta(days=30), key="hist_inicio")
-                with col2:
-                    fecha_hist_fin = st.date_input("Fecha fin", get_mexico_date(), key="hist_fin")
-                
-                historial = get_asignaciones_por_dia(usuario_id_hist, fecha_hist_inicio, fecha_hist_fin)
-                
-                if not historial.empty:
-                    st.dataframe(historial, use_container_width=True)
-                    
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        st.metric("Total días con asignación", historial['fecha'].nunique())
-                    with col2:
-                        st.metric("Promedio invernaderos/día", len(historial) / max(historial['fecha'].nunique(), 1))
-                    with col3:
-                        st.metric("Última asignación", historial.iloc[0]['fecha'] if not historial.empty else "N/A")
-                    
-                    output = export_to_excel(historial, "Historial_Asignaciones")
-                    st.download_button("📥 Exportar historial a Excel", data=output, file_name=f"historial_asignaciones_{usuario_id_hist}.xlsx")
-                else:
-                    st.info("No hay asignaciones especiales para este usuario en el período seleccionado")
-
-# ==========================================
-# INTERFACES DE USUARIO (MÓDULOS PRINCIPALES)
-# ==========================================
-
-def mostrar_gestion_personal():
-    st.header("👥 Gestión de Trabajadores")
-    tab1, tab2 = st.tabs(["Alta de Trabajador", "Buscar/Editar/Baja"])
-    with tab1:
-        with st.form("form_alta", clear_on_submit=True):
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                apellido_paterno = st.text_input("Apellido Paterno *", key="alta_apellido_paterno")
-                nombre = st.text_input("Nombre *", key="alta_nombre")
-                telefono = st.text_input("Teléfono (10 dígitos)", key="alta_telefono")
-            with col2:
-                apellido_materno = st.text_input("Apellido Materno", key="alta_apellido_materno")
-                correo = st.text_input("Correo Electrónico", key="alta_correo")
-                fecha_alta = st.date_input("Fecha de Alta *", get_mexico_date(), key="alta_fecha")
-            with col3:
-                st.write("")
-                st.write("")
-                st.info("* Campos obligatorios")
-            st.markdown("---")
-            col4, col5, col6 = st.columns(3)
-            with col4:
-                departamentos_list = get_departamentos_nombres()
-                departamento = st.selectbox("Departamento *", departamentos_list if departamentos_list else ["Sin datos"], key="alta_departamento")
-            with col5:
-                subdepartamentos_list = get_subdepartamentos_nombres()
-                subdepartamento = st.selectbox("Subdepartamento *", subdepartamentos_list if subdepartamentos_list else ["Sin datos"], key="alta_subdepartamento")
-            with col6:
-                tipo_nomina = st.selectbox("Tipo de Nómina *", ["especial", "imss"], key="alta_tipo_nomina")
-            puestos_list = get_puestos_nombres()
-            puesto = st.selectbox("Puesto *", puestos_list if puestos_list else ["Sin datos"], key="alta_puesto")
-            if st.form_submit_button("💾 Guardar Trabajador", use_container_width=True):
-                if not apellido_paterno or not nombre:
-                    st.error("Complete campos obligatorios")
-                elif telefono and not validar_telefono(telefono):
-                    st.error("Teléfono debe tener 10 dígitos")
-                elif correo and not validar_email(correo):
-                    st.error("Email inválido")
-                elif departamento == "Sin datos" or subdepartamento == "Sin datos" or puesto == "Sin datos":
-                    st.error("Primero debe agregar departamentos, subdepartamentos y puestos en Catálogos")
-                else:
-                    data = {"ap": apellido_paterno.strip().upper(), "am": apellido_materno.strip().upper() if apellido_materno else None, "nom": nombre.strip().upper(), "cor": correo.strip() if correo else None, "tel": telefono.strip() if telefono else None, "fa": fecha_alta, "departamento": departamento, "subdepartamento": subdepartamento, "tn": tipo_nomina, "puesto": puesto}
-                    success, msg = add_worker(data)
-                    if success:
-                        st.success(msg)
-                        st.balloons()
-                    else:
-                        st.error(msg)
-    with tab2:
-        col1, col2 = st.columns([3, 1])
+        col1, col2, col3 = st.columns(3)
         with col1:
-            search_term = st.text_input("Buscar:", placeholder="Nombre o apellido...", key="buscar_trabajador")
+            fecha_hist_inicio = st.date_input("Fecha inicio histórico:", datetime.now().date() - timedelta(days=30), key="hist_inicio")
         with col2:
-            estatus_filter = st.selectbox("Estatus", ["todos", "activo", "baja"], key="estatus_filtro")
-        if st.button("🔍 Buscar", key="btn_buscar_personal", use_container_width=True):
-            if search_term:
-                results = search_workers(search_term, estatus_filter)
-                if not results.empty:
-                    st.success(f"Encontrados: {len(results)}")
-                    for idx, row in results.iterrows():
-                        with st.expander(f"📋 {row['apellido_paterno']} {row['apellido_materno'] or ''}, {row['nombre']}"):
-                            col1, col2, col3 = st.columns(3)
-                            with col1:
-                                st.write(f"**ID:** {row['id']}")
-                                st.write(f"**Email:** {row['correo'] or 'N/A'}")
-                                st.write(f"**Tel:** {row['telefono'] or 'N/A'}")
-                            with col2:
-                                st.write(f"**Depto:** {row['departamento']}")
-                                st.write(f"**Puesto:** {row['puesto']}")
-                                st.write(f"**Estatus:** {row['estatus']}")
-                            with col3:
-                                if row['estatus'] == 'activo':
-                                    if st.button("🚫 Dar Baja", key=f"baja_{row['id']}_{idx}"):
-                                        st.session_state['baja_id'] = row['id']
-                                        st.session_state['baja_nombre'] = row['nombre']
-                                else:
-                                    if st.button("🔄 Reactivar", key=f"reactivar_{row['id']}_{idx}"):
-                                        success, msg = reactivar_trabajador(row['id'])
-                                        if success:
-                                            st.success(msg)
-                                            st.rerun()
-                                        else:
-                                            st.error(msg)
-                                if st.button("✏️ Editar", key=f"edit_{row['id']}_{idx}"):
-                                    st.session_state['editing_id'] = row['id']
-                            if 'baja_id' in st.session_state and st.session_state['baja_id'] == row['id']:
-                                st.warning(f"¿Dar de baja a {st.session_state['baja_nombre']}?")
-                                fecha = st.date_input("Fecha de baja", get_mexico_date(), key=f"fecha_baja_{row['id']}_{idx}")
-                                col_yes, col_no = st.columns(2)
-                                with col_yes:
-                                    if st.button("✅ Confirmar", key=f"conf_baja_{row['id']}_{idx}"):
-                                        success, msg = dar_baja(row['id'], fecha)
-                                        if success:
-                                            st.success(msg)
-                                            del st.session_state['baja_id']
-                                            del st.session_state['baja_nombre']
-                                            st.rerun()
-                                        else:
-                                            st.error(msg)
-                                with col_no:
-                                    if st.button("❌ Cancelar", key=f"cancel_baja_{row['id']}_{idx}"):
-                                        del st.session_state['baja_id']
-                                        del st.session_state['baja_nombre']
-                                        st.rerun()
-                            if 'editing_id' in st.session_state and st.session_state['editing_id'] == row['id']:
-                                worker = get_worker_by_id(row['id'])
-                                if worker:
-                                    with st.form(f"form_edit_{row['id']}_{idx}"):
-                                        st.subheader(f"Editando: {worker['nombre']} {worker['apellido_paterno']}")
-                                        col_a, col_b = st.columns(2)
-                                        with col_a:
-                                            ap = st.text_input("Apellido Paterno", worker['apellido_paterno'], key=f"edit_ap_{row['id']}_{idx}")
-                                            nom = st.text_input("Nombre", worker['nombre'], key=f"edit_nom_{row['id']}_{idx}")
-                                            tel = st.text_input("Teléfono", worker['telefono'] or "", key=f"edit_tel_{row['id']}_{idx}")
-                                        with col_b:
-                                            am = st.text_input("Apellido Materno", worker['apellido_materno'] or "", key=f"edit_am_{row['id']}_{idx}")
-                                            email = st.text_input("Email", worker['correo'] or "", key=f"edit_email_{row['id']}_{idx}")
-                                        deptos = get_departamentos_nombres()
-                                        depto = st.selectbox("Departamento", deptos, index=deptos.index(worker['departamento_nombre']) if worker['departamento_nombre'] in deptos else 0, key=f"edit_depto_{row['id']}_{idx}")
-                                        subs = get_subdepartamentos_nombres()
-                                        sub = st.selectbox("Subdepartamento", subs, index=subs.index(worker['subdepartamento_nombre']) if worker['subdepartamento_nombre'] in subs else 0, key=f"edit_sub_{row['id']}_{idx}")
-                                        tipo = st.selectbox("Tipo Nómina", ["especial", "imss"], index=0 if worker['tipo_nomina']=='especial' else 1, key=f"edit_tipo_{row['id']}_{idx}")
-                                        puestos = get_puestos_nombres()
-                                        p = st.selectbox("Puesto", puestos, index=puestos.index(worker['puesto_nombre']) if worker['puesto_nombre'] in puestos else 0, key=f"edit_puesto_{row['id']}_{idx}")
-                                        est = st.selectbox("Estatus", ["activo", "baja"], index=0 if worker['estatus']=='activo' else 1, key=f"edit_estatus_{row['id']}_{idx}")
-                                        col_buttons = st.columns(2)
-                                        with col_buttons[0]:
-                                            if st.form_submit_button("💾 Guardar Cambios"):
-                                                data = {'apellido_paterno': ap, 'apellido_materno': am, 'nombre': nom, 'correo': email, 'telefono': tel, 'departamento': depto, 'subdepartamento': sub, 'tipo_nomina': tipo, 'puesto': p, 'estatus': est}
-                                                success, msg = update_worker(row['id'], data)
-                                                if success:
-                                                    st.success(msg)
-                                                    del st.session_state['editing_id']
-                                                    st.rerun()
-                                                else:
-                                                    st.error(msg)
-                                        with col_buttons[1]:
-                                            if st.form_submit_button("❌ Cancelar"):
-                                                del st.session_state['editing_id']
-                                                st.rerun()
-                else:
-                    st.info("No se encontraron resultados")
-            else:
-                st.warning("Ingresa un término de búsqueda")
+            fecha_hist_fin = st.date_input("Fecha fin histórico:", datetime.now().date(), key="hist_fin")
+        with col3:
+            invernaderos_filtro = [("", "Todos")] + [(id_inv, nombre) for id_inv, nombre, _ in get_invernaderos()]
+            invernadero_filtro = st.selectbox(
+                "Filtrar por invernadero:",
+                invernaderos_filtro,
+                format_func=lambda x: x[1] if isinstance(x, tuple) else x
+            )
+        
+        invernadero_id_filtro = invernadero_filtro[0] if invernadero_filtro and invernadero_filtro[0] else None
+        
+        envios = get_envios_enfriado(fecha_hist_inicio, fecha_hist_fin, invernadero_id_filtro)
+        
+        if not envios.empty:
+            envios_display = envios.copy()
+            envios_display['fecha'] = pd.to_datetime(envios_display['fecha']).dt.strftime('%d/%m/%Y')
+            if 'hora' in envios_display.columns:
+                envios_display['hora'] = envios_display['hora'].astype(str).str[:5]
+            
+            columns_to_show = ['fecha', 'hora', 'invernadero', 'tipo_envio', 'presentacion', 
+                               'cantidad_cajas', 'lote', 'trabajador_envia', 'trabajador_recibe', 'observaciones']
+            columns_available = [col for col in columns_to_show if col in envios_display.columns]
+            
+            st.dataframe(
+                envios_display[columns_available],
+                use_container_width=True
+            )
+            
+            output = export_to_excel(envios, "Envios_Enfriado")
+            st.download_button(
+                "📥 Exportar Historial a Excel",
+                data=output,
+                file_name=f"envios_enfriado_{datetime.now().date()}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        else:
+            st.info("No hay registros de envíos en el período seleccionado")
 
-def formulario_cosecha_manual():
-    st.header("🌾 Registro de Cosecha Manual")
-    fecha_actual = get_mexico_date()
-    fecha_formateada = fecha_actual.strftime("%Y/%m/%d")
-    semana_actual = get_mexico_week()
-    dia_espanol = get_mexico_day_spanish()
-    col_fecha, col_dia, col_semana = st.columns(3)
-    with col_fecha:
-        st.markdown(f'<div class="date-card"><div style="font-size: 12px;">📅 FECHA</div><div style="font-size: 24px; font-weight: bold;">{fecha_formateada}</div></div>', unsafe_allow_html=True)
-    with col_dia:
-        st.markdown(f'<div class="time-card"><div style="font-size: 12px;">📆 DÍA</div><div style="font-size: 24px; font-weight: bold;">{dia_espanol}</div></div>', unsafe_allow_html=True)
-    with col_semana:
-        st.markdown(f'<div class="week-card"><div style="font-size: 12px;">📆 SEMANA</div><div style="font-size: 24px; font-weight: bold;">{semana_actual}</div></div>', unsafe_allow_html=True)
-    st.markdown("---")
-    if 'clams_value' not in st.session_state:
-        st.session_state.clams_value = 0.0
-    if 'presentacion_actual' not in st.session_state:
-        st.session_state.presentacion_actual = "6 oz"
-    if 'cajas_calculadas' not in st.session_state:
-        st.session_state.cajas_calculadas = 0.0
-    def calcular_cajas():
-        clams = st.session_state.clams_value
-        if st.session_state.presentacion_actual == "12 oz":
-            st.session_state.cajas_calculadas = clams / 12 if clams > 0 else 0
+# ==========================================
+# INTERFAZ DE DASHBOARD DE ASISTENCIA
+# ==========================================
+
+def mostrar_dashboard_asistencia():
+    st.header("📊 Dashboard de Asistencia")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        fecha_inicio = st.date_input("📅 Fecha inicio:", datetime.now().date() - timedelta(days=30), key="asist_inicio")
+    with col2:
+        fecha_fin = st.date_input("📅 Fecha fin:", datetime.now().date(), key="asist_fin")
+    
+    if st.button("🔄 Actualizar Dashboard", use_container_width=True):
+        stats = get_estadisticas_asistencia(fecha_inicio, fecha_fin)
+        
+        st.markdown("---")
+        st.subheader("📈 Indicadores Clave de Asistencia")
+        
+        total_trabajadores = len(get_all_workers())
+        total_registros = stats['registros_por_tipo']['cantidad'].sum() if not stats['registros_por_tipo'].empty else 0
+        horas_promedio = stats['horas_promedio']['horas_promedio'].mean() if not stats['horas_promedio'].empty else 0
+        tiempo_comida = stats['tiempo_comida']['horas_comida'].mean() if not stats['tiempo_comida'].empty else 0
+        visitas_totales = stats['tiempo_invernadero']['visitas'].sum() if not stats['tiempo_invernadero'].empty else 0
+        
+        total_faltas = stats['faltas_descansos']['faltas'].sum() if not stats['faltas_descansos'].empty else 0
+        total_descansos = stats['faltas_descansos']['descansos'].sum() if not stats['faltas_descansos'].empty else 0
+        total_presentes = total_registros - total_faltas
+        
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("👥 Total Trabajadores", total_trabajadores, delta=None)
+        with col2:
+            st.metric("✅ Presentes", total_presentes)
+        with col3:
+            st.metric("❌ Faltas", total_faltas)
+        with col4:
+            st.metric("💤 Descansos", total_descansos)
+        
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("⏱️ Horas Trabajadas Promedio", f"{horas_promedio:.1f}h")
+        with col2:
+            st.metric("🍽️ Tiempo Comida Promedio", f"{tiempo_comida:.1f}h")
+        with col3:
+            st.metric("🏭 Visitas a Invernaderos", f"{visitas_totales:,}")
+        with col4:
+            tasa_asistencia = (total_presentes / max(total_trabajadores, 1)) * 100
+            st.metric("📊 Tasa de Asistencia", f"{tasa_asistencia:.1f}%")
+        
+        st.markdown("---")
+        
+        st.subheader("📅 Evolución de Asistencia Diaria")
+        if not stats['asistencia_diaria'].empty:
+            fig = make_subplots(specs=[[{"secondary_y": True}]])
+            
+            fig.add_trace(
+                go.Bar(x=stats['asistencia_diaria']['fecha'], 
+                       y=stats['asistencia_diaria']['total_trabajadores'],
+                       name="Total Trabajadores Activos",
+                       marker_color='#3498db',
+                       opacity=0.7),
+                secondary_y=False
+            )
+            
+            fig.add_trace(
+                go.Scatter(x=stats['asistencia_diaria']['fecha'], 
+                          y=stats['asistencia_diaria']['registraron_entrada'],
+                          name="Registraron Asistencia",
+                          mode='lines+markers',
+                          line=dict(color='#2ecc71', width=3),
+                          marker=dict(size=8, color='#27ae60')),
+                secondary_y=True
+            )
+            
+            faltas_diarias = stats['asistencia_diaria']['total_trabajadores'] - stats['asistencia_diaria']['registraron_entrada']
+            
+            fig.add_trace(
+                go.Scatter(x=stats['asistencia_diaria']['fecha'], 
+                          y=faltas_diarias,
+                          name="Faltas",
+                          mode='lines+markers',
+                          line=dict(color='#e74c3c', width=2, dash='dash'),
+                          marker=dict(size=6, color='#c0392b')),
+                secondary_y=True
+            )
+            
+            fig.update_layout(
+                title="Evolución de Asistencia Diaria",
+                xaxis_title="Fecha",
+                hovermode='x unified',
+                plot_bgcolor='rgba(0,0,0,0)',
+                paper_bgcolor='rgba(0,0,0,0)'
+            )
+            fig.update_yaxes(title_text="Número de Trabajadores", secondary_y=False, gridcolor='#ecf0f1')
+            fig.update_yaxes(title_text="Registros", secondary_y=True, gridcolor='#ecf0f1')
+            
+            st.plotly_chart(fig, use_container_width=True)
+        
+        st.markdown("---")
+        
+        st.subheader("📊 Faltas y Descansos por Trabajador")
+        if not stats['faltas_descansos'].empty:
+            col1, col2 = st.columns(2)
+            with col1:
+                fig = px.bar(stats['faltas_descansos'].sort_values('faltas', ascending=False).head(10),
+                            x='trabajador', y='faltas',
+                            title='Top 10 Trabajadores con Más Faltas',
+                            color='faltas',
+                            color_continuous_scale='reds',
+                            text='faltas')
+                fig.update_traces(texttemplate='%{text}', textposition='outside')
+                fig.update_layout(xaxis_tickangle=-45)
+                st.plotly_chart(fig, use_container_width=True)
+            
+            with col2:
+                fig = px.bar(stats['faltas_descansos'].sort_values('descansos', ascending=False).head(10),
+                            x='trabajador', y='descansos',
+                            title='Top 10 Trabajadores con Más Descansos',
+                            color='descansos',
+                            color_continuous_scale='oranges',
+                            text='descansos')
+                fig.update_traces(texttemplate='%{text}', textposition='outside')
+                fig.update_layout(xaxis_tickangle=-45)
+                st.plotly_chart(fig, use_container_width=True)
+        
+        st.markdown("---")
+        
+        st.subheader("🏭 Tiempo Promedio por Invernadero")
+        if not stats['tiempo_invernadero'].empty:
+            col1, col2 = st.columns(2)
+            with col1:
+                fig = px.bar(stats['tiempo_invernadero'], 
+                            x='invernadero', y='horas_promedio',
+                            title='Horas Promedio por Invernadero',
+                            color='horas_promedio',
+                            color_continuous_scale='oranges',
+                            text='horas_promedio')
+                fig.update_traces(texttemplate='%{text:.1f}h', textposition='outside')
+                st.plotly_chart(fig, use_container_width=True)
+            
+            with col2:
+                fig = px.bar(stats['tiempo_invernadero'], 
+                            x='invernadero', y='visitas',
+                            title='Número de Visitas por Invernadero',
+                            color='visitas',
+                            color_continuous_scale='purples',
+                            text='visitas')
+                fig.update_traces(texttemplate='%{text}', textposition='outside')
+                st.plotly_chart(fig, use_container_width=True)
+        
+        st.markdown("---")
+        
+        st.subheader("📊 Visitas Diarias por Invernadero")
+        conn = sqlite3.connect(DB_PATH)
+        query_visitas_diarias = """
+            SELECT 
+                a.fecha,
+                i.nombre as invernadero,
+                COUNT(*) as visitas
+            FROM asistencia a
+            LEFT JOIN invernaderos i ON a.invernadero_id = i.id
+            WHERE a.fecha BETWEEN ? AND ?
+            AND a.hora_entrada IS NOT NULL
+            GROUP BY a.fecha, i.nombre
+            ORDER BY a.fecha
+        """
+        df_visitas = pd.read_sql_query(query_visitas_diarias, conn, params=(fecha_inicio, fecha_fin))
+        conn.close()
+        
+        if not df_visitas.empty:
+            fig = px.line(df_visitas, x='fecha', y='visitas', color='invernadero',
+                         title='Visitas Diarias por Invernadero',
+                         markers=True,
+                         color_discrete_sequence=px.colors.qualitative.Set1)
+            fig.update_layout(plot_bgcolor='rgba(0,0,0,0)', hovermode='x unified')
+            st.plotly_chart(fig, use_container_width=True)
+        
+        st.markdown("---")
+        
+        st.subheader("👥 Horas Trabajadas por Trabajador")
+        if not stats['horas_promedio'].empty:
+            fig = px.bar(stats['horas_promedio'].sort_values('horas_promedio', ascending=False).head(10), 
+                        x='trabajador', y='horas_promedio',
+                        title='Top 10 Trabajadores por Horas Trabajadas',
+                        color='horas_promedio',
+                        color_continuous_scale='greens',
+                        text='horas_promedio')
+            fig.update_traces(texttemplate='%{text:.1f}h', textposition='outside')
+            fig.update_layout(xaxis_tickangle=-45)
+            st.plotly_chart(fig, use_container_width=True)
+        
+        st.markdown("---")
+        
+        st.subheader("🍽️ Tiempo de Comida por Trabajador")
+        if not stats['tiempo_comida'].empty:
+            fig = px.bar(stats['tiempo_comida'].sort_values('horas_comida', ascending=False).head(10), 
+                        x='trabajador', y='horas_comida',
+                        title='Top 10 Trabajadores por Tiempo de Comida',
+                        color='horas_comida',
+                        color_continuous_scale='reds',
+                        text='horas_comida')
+            fig.update_traces(texttemplate='%{text:.1f}h', textposition='outside')
+            fig.update_layout(xaxis_tickangle=-45)
+            st.plotly_chart(fig, use_container_width=True)
+        
+        st.markdown("---")
+        
+        st.subheader("📊 Distribución de Eventos de Asistencia")
+        if not stats['registros_por_tipo'].empty:
+            mapeo_eventos = {
+                'entrada_invernadero': '🚪 Entrada',
+                'salida_comer': '🍽️ Salida Comer',
+                'regreso_comida': '✅ Regreso Comida',
+                'salida_invernadero': '🚪 Salida'
+            }
+            stats['registros_por_tipo']['tipo'] = stats['registros_por_tipo']['tipo_evento'].map(mapeo_eventos)
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                fig = px.pie(stats['registros_por_tipo'], values='cantidad', names='tipo',
+                            title='Distribución de Eventos',
+                            color_discrete_sequence=px.colors.qualitative.Set3)
+                fig.update_traces(textposition='inside', textinfo='percent+label')
+                st.plotly_chart(fig, use_container_width=True)
+            
+            with col2:
+                fig = px.bar(stats['registros_por_tipo'], x='tipo', y='cantidad',
+                            title='Eventos por Tipo',
+                            color='cantidad',
+                            color_continuous_scale='viridis',
+                            text='cantidad')
+                fig.update_traces(texttemplate='%{text}', textposition='outside')
+                st.plotly_chart(fig, use_container_width=True)
+        
+        st.markdown("---")
+        
+        st.subheader("📋 Resumen de Asistencia del Día")
+        
+        fecha_hoy = datetime.now().date()
+        df_resumen = get_resumen_asistencia_dia(fecha_hoy)
+        
+        if not df_resumen.empty:
+            col1, col2, col3, col4, col5 = st.columns(5)
+            with col1:
+                total = len(df_resumen)
+                st.metric("👥 Total", total)
+            with col2:
+                presentes = len(df_resumen[df_resumen['estado_actual'] == 'Finalizado']) + len(df_resumen[df_resumen['estado_actual'] == 'En invernadero']) + len(df_resumen[df_resumen['estado_actual'] == 'En comida'])
+                st.metric("✅ Presentes", presentes)
+            with col3:
+                faltas = len(df_resumen[df_resumen['estado_actual'] == 'Falta'])
+                st.metric("❌ Faltas", faltas)
+            with col4:
+                descansos = len(df_resumen[df_resumen['estado_actual'] == 'Descanso'])
+                st.metric("💤 Descansos", descansos)
+            with col5:
+                en_invernadero = len(df_resumen[df_resumen['estado_actual'] == 'En invernadero'])
+                st.metric("🏭 En Invernadero", en_invernadero)
+            
+            st.dataframe(df_resumen, use_container_width=True)
+            
+            output = export_to_excel(df_resumen, f"Asistencia_{fecha_hoy}")
+            st.download_button(
+                "📥 Exportar Reporte de Asistencia a Excel",
+                data=output,
+                file_name=f"reporte_asistencia_{fecha_hoy}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
         else:
-            st.session_state.cajas_calculadas = clams / 6 if clams > 0 else 0
-    trabajadores = get_all_workers()
-    if not trabajadores.empty:
-        trabajador_seleccionado = st.selectbox("Seleccionar trabajador:", trabajadores.apply(lambda x: f"{x['id']} - {x['nombre']} {x['apellido_paterno']}", axis=1), key="trabajador_manual_cosecha")
-        trabajador_id = int(trabajador_seleccionado.split(' - ')[0]) if trabajador_seleccionado else None
-    else:
-        trabajador_id = None
-    invernaderos = get_invernaderos_usuario()  # Usar solo invernaderos asignados
-    if invernaderos:
-        invernadero_seleccionado = st.selectbox("Invernadero *", invernaderos, format_func=lambda x: f"{x[1]} - {x[2]}", key="invernadero_manual_cosecha")
-        invernadero_id = invernadero_seleccionado[0]
-    else:
-        invernadero_id = None
-        st.error("No tienes invernaderos asignados para hoy")
-    tipo_cosecha = st.radio("Tipo de Cosecha:", ["Nacional", "Exportación"], horizontal=True, key="tipo_cosecha_manual")
-    if tipo_cosecha == "Nacional":
-        calidad = st.selectbox("Calidad:", ["Salmon", "Sobretono"], key="calidad_manual")
-        presentacion = "6 oz"
-        st.info("✅ Presentación automática: 6 oz")
-    else:
-        calidad = None
-        presentacion = st.selectbox("Presentación:", ["6 oz", "12 oz"], on_change=calcular_cajas, key="presentacion_manual")
-        st.session_state.presentacion_actual = presentacion
-    cantidad_clams = st.number_input("Cantidad de Clams:", min_value=0.0, value=st.session_state.clams_value, step=1.0, on_change=calcular_cajas, key="clams_manual")
-    st.session_state.clams_value = cantidad_clams
-    merma_kilos = st.number_input("Merma (kilos):", min_value=0.0, value=0.0, step=0.5, key="merma_manual")
-    st.text_input("Número de Cajas:", value=f"{st.session_state.cajas_calculadas:.2f}", disabled=True, key="cajas_manual")
-    if merma_kilos > 0 and cantidad_clams > 0:
-        porcentaje_merma = (merma_kilos / cantidad_clams) * 100
-        st.metric("📊 Porcentaje de Merma", f"{porcentaje_merma:.2f}%")
-    if st.button("💾 Guardar Cosecha", type="primary", use_container_width=True, key="guardar_cosecha_manual"):
-        if not trabajador_id:
-            st.error("Seleccione un trabajador")
-        elif not invernadero_id:
-            st.error("Seleccione un invernadero")
-        elif cantidad_clams <= 0:
-            st.error("Ingrese una cantidad válida de clams")
-        else:
-            data = {'fecha': fecha_actual, 'dia': dia_espanol, 'semana': semana_actual, 'trabajador_id': trabajador_id, 'invernadero_id': invernadero_id, 'tipo_cosecha': tipo_cosecha, 'calidad': calidad, 'presentacion': presentacion, 'cantidad_clams': float(cantidad_clams), 'merma_kilos': float(merma_kilos)}
-            success, msg = guardar_cosecha(data)
-            if success:
-                st.success(msg)
-                st.balloons()
-                st.session_state.clams_value = 0.0
-                st.session_state.cajas_calculadas = 0.0
-            else:
-                st.error(msg)
+            st.info("No hay registros de asistencia para hoy")
+
+# ==========================================
+# INTERFAZ DE CONTROL DE ASISTENCIA
+# ==========================================
 
 def mostrar_control_asistencia():
     st.header("🕐 Control de Asistencia")
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📱 Registrar Asistencia", "📊 Resumen del Día", "📋 Historial", "💤 Registrar Descanso", "⚠️ Incidencias"])
+    
+    tab1, tab2, tab3, tab4 = st.tabs(["📱 Registrar Asistencia", "📊 Resumen del Día", "📋 Historial", "💤 Registrar Descanso"])
+    
     with tab1:
         st.subheader("Registro de Asistencia")
-        tab_scan, tab_manual = st.tabs(["📷 Escanear QR", "📝 Registrar Manual"])
-        with tab_scan:
-            escanear_qr_con_camara(tipo_evento="asistencia", mostrar_invernadero=True)
-        with tab_manual:
-            if not get_configuracion_sistema('registro_manual_asistencia'):
-                st.warning("⚠️ El registro manual de asistencia está deshabilitado por el administrador")
-            else:
-                trabajadores = get_all_workers()
-                if not trabajadores.empty:
-                    trabajador_seleccionado = st.selectbox("Seleccionar trabajador:", trabajadores.apply(lambda x: f"{x['id']} - {x['nombre']} {x['apellido_paterno']}", axis=1), key="trabajador_asistencia_manual")
-                    trabajador_id = int(trabajador_seleccionado.split(' - ')[0]) if trabajador_seleccionado else None
+        
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            qr_input = st.text_input("Escanear código QR", 
+                                    placeholder="Ej: 1|Juan Pérez|Operario",
+                                    key="qr_asistencia")
+        with col2:
+            if st.button("🔍 Buscar", key="buscar_qr", use_container_width=True):
+                if qr_input:
+                    try:
+                        partes = qr_input.split('|')
+                        if len(partes) >= 2:
+                            trabajador_id = partes[0]
+                            trabajador = get_worker_by_id(trabajador_id)
+                            if trabajador:
+                                st.session_state['trabajador_asistencia'] = trabajador
+                                st.success(f"Trabajador encontrado: {trabajador['nombre']} {trabajador['apellido_paterno']}")
+                            else:
+                                st.error("Trabajador no encontrado")
+                    except Exception as e:
+                        st.error(f"Error al procesar QR: {str(e)}")
+        
+        if 'trabajador_asistencia' in st.session_state:
+            trabajador = st.session_state['trabajador_asistencia']
+            
+            col1, col2 = st.columns([2, 1])
+            with col1:
+                st.info(f"""
+                **Trabajador:** {trabajador['nombre']} {trabajador['apellido_paterno']}
+                **Puesto:** {trabajador['puesto_nombre']}
+                **Departamento:** {trabajador['departamento_nombre']}
+                """)
+            
+            estado_actual = get_estado_asistencia_actual(trabajador['id'])
+            
+            with col2:
+                if estado_actual:
+                    if estado_actual['estado'] == 'activo':
+                        st.warning(f"🟢 Estado: En invernadero ({estado_actual['invernadero']})\nDesde: {estado_actual['hora_entrada']}")
+                    elif estado_actual['estado'] == 'comida':
+                        st.warning(f"🍽️ Estado: En comida\nSalida: {estado_actual['hora_salida_comida']}")
                 else:
-                    trabajador_id = None
-                invernaderos = get_invernaderos_usuario()  # Usar solo invernaderos asignados
+                    st.success("✅ Estado: Sin registro activo")
+            
+            st.markdown("---")
+            
+            if not estado_actual:
+                st.subheader("📥 Registrar Entrada")
+                invernaderos = get_invernaderos()
                 if invernaderos:
-                    invernadero = st.selectbox("Invernadero:", invernaderos, format_func=lambda x: f"{x[1]} - {x[2]}", key="invernadero_asistencia_manual")
-                    invernadero_id = invernadero[0]
-                else:
-                    invernadero_id = None
-                    st.warning("No tienes invernaderos asignados para hoy")
-                tipo_evento = st.selectbox("Tipo de Evento:", ["entrada_invernadero", "salida_comer", "regreso_comida", "salida_invernadero"], format_func=lambda x: {'entrada_invernadero': '🚪 Entrada a Invernadero', 'salida_comer': '🍽️ Salida a Comer', 'regreso_comida': '✅ Regreso de Comida', 'salida_invernadero': '🚪 Salida de Invernadero'}[x], key="tipo_evento_asistencia_manual")
-                if st.button("✅ Registrar Evento", type="primary", use_container_width=True, key="btn_registrar_evento_manual"):
-                    if not trabajador_id:
-                        st.error("Seleccione un trabajador")
-                    elif tipo_evento == 'entrada_invernadero' and not invernadero_id:
-                        st.error("Seleccione un invernadero")
-                    else:
-                        success, msg = registrar_evento_asistencia(trabajador_id, invernadero_id if tipo_evento == 'entrada_invernadero' else None, tipo_evento)
+                    invernadero_seleccionado = st.selectbox(
+                        "Seleccionar invernadero:",
+                        invernaderos,
+                        format_func=lambda x: f"{x[1]} - {x[2]}",
+                        key="invernadero_asistencia"
+                    )
+                    
+                    if st.button("🚪 Registrar Entrada al Invernadero", type="primary", use_container_width=True):
+                        success, msg = registrar_evento_asistencia(
+                            trabajador['id'],
+                            invernadero_seleccionado[0],
+                            'entrada_invernadero'
+                        )
                         if success:
                             st.success(msg)
                             st.balloons()
+                            st.rerun()
                         else:
                             st.error(msg)
+                else:
+                    st.error("No hay invernaderos registrados")
+            
+            elif estado_actual['estado'] == 'activo':
+                st.subheader("🔄 Opciones Disponibles")
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    if st.button("🍽️ Salir a Comer", use_container_width=True):
+                        success, msg = registrar_evento_asistencia(
+                            trabajador['id'],
+                            None,
+                            'salida_comer'
+                        )
+                        if success:
+                            st.success(msg)
+                            st.rerun()
+                        else:
+                            st.error(msg)
+                
+                with col2:
+                    if st.button("🚪 Salir del Invernadero", use_container_width=True):
+                        success, msg = registrar_evento_asistencia(
+                            trabajador['id'],
+                            None,
+                            'salida_invernadero'
+                        )
+                        if success:
+                            st.success(msg)
+                            st.balloons()
+                            del st.session_state['trabajador_asistencia']
+                            st.rerun()
+                        else:
+                            st.error(msg)
+            
+            elif estado_actual['estado'] == 'comida':
+                st.subheader("🍽️ Registrar Regreso de Comida")
+                if st.button("✅ Regresar de Comida", type="primary", use_container_width=True):
+                    success, msg = registrar_evento_asistencia(
+                        trabajador['id'],
+                        None,
+                        'regreso_comida'
+                    )
+                    if success:
+                        st.success(msg)
+                        st.rerun()
+                    else:
+                        st.error(msg)
+            
+            if st.button("🗑️ Limpiar Selección", use_container_width=True):
+                del st.session_state['trabajador_asistencia']
+                st.rerun()
+    
     with tab2:
         st.subheader("Resumen de Asistencia del Día")
-        fecha_resumen = st.date_input("Seleccionar fecha:", get_mexico_date(), key="fecha_resumen_asist")
+        
+        fecha_resumen = st.date_input("Seleccionar fecha:", datetime.now().date(), key="fecha_resumen_asist")
+        
         if st.button("Actualizar Resumen", key="btn_resumen_asist", use_container_width=True):
             df_resumen = get_resumen_asistencia_dia(fecha_resumen)
+            
             if not df_resumen.empty:
-                col1, col2, col3, col4, col5, col6 = st.columns(6)
-                with col1: st.metric("Total", len(df_resumen))
-                with col2: st.metric("Presentes", len(df_resumen[df_resumen['estado_actual'].str.contains('Finalizado|En invernadero|En comida', na=False)]))
-                with col3: st.metric("Faltas", len(df_resumen[df_resumen['estado_actual'] == 'Falta']))
-                with col4: st.metric("Descansos", len(df_resumen[df_resumen['estado_actual'] == 'Descanso']))
-                with col5: st.metric("En Invernadero", len(df_resumen[df_resumen['estado_actual'] == 'En invernadero']))
-                with col6: st.metric("Incidencias", len(df_resumen[df_resumen['estado_actual'].str.contains('Incidencia:', na=False)]))
-                st.dataframe(df_resumen[['trabajador', 'hora_entrada', 'hora_salida_comida', 'hora_entrada_comida', 'hora_salida', 'invernadero', 'estado_actual']], use_container_width=True)
+                col1, col2, col3, col4, col5 = st.columns(5)
+                with col1:
+                    total = len(df_resumen)
+                    st.metric("Total Trabajadores", total)
+                with col2:
+                    presentes = len(df_resumen[df_resumen['estado_actual'] == 'Finalizado']) + len(df_resumen[df_resumen['estado_actual'] == 'En invernadero']) + len(df_resumen[df_resumen['estado_actual'] == 'En comida'])
+                    st.metric("Presentes", presentes)
+                with col3:
+                    faltas = len(df_resumen[df_resumen['estado_actual'] == 'Falta'])
+                    st.metric("Faltas", faltas)
+                with col4:
+                    descansos = len(df_resumen[df_resumen['estado_actual'] == 'Descanso'])
+                    st.metric("Descansos", descansos)
+                with col5:
+                    en_invernadero = len(df_resumen[df_resumen['estado_actual'] == 'En invernadero'])
+                    st.metric("En Invernadero", en_invernadero)
+                
+                st.dataframe(df_resumen, use_container_width=True)
+                
                 output = export_to_excel(df_resumen, f"Asistencia_{fecha_resumen}")
-                st.download_button("📥 Exportar a Excel", data=output, file_name=f"asistencia_{fecha_resumen}.xlsx")
+                st.download_button(
+                    "📥 Exportar a Excel",
+                    data=output,
+                    file_name=f"asistencia_{fecha_resumen}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
             else:
                 st.info("No hay registros para esta fecha")
+    
     with tab3:
         st.subheader("Historial de Asistencia")
+        
         col1, col2, col3 = st.columns(3)
+        
         with col1:
             trabajadores_list = get_all_workers()
-            trabajadores_opciones = [("", "Todos")] + [(row['id'], f"{row['nombre']} {row['apellido_paterno']}") for _, row in trabajadores_list.iterrows()]
-            trabajador_seleccionado = st.selectbox("Filtrar por trabajador:", trabajadores_opciones, format_func=lambda x: x[1] if isinstance(x, tuple) else x, key="hist_trabajador_asist")
+            trabajadores_opciones = [("", "Todos")] + [(row['id'], f"{row['nombre']} {row['apellido_paterno']}") 
+                                                        for _, row in trabajadores_list.iterrows()]
+            trabajador_seleccionado = st.selectbox(
+                "Filtrar por trabajador:",
+                trabajadores_opciones,
+                format_func=lambda x: x[1] if isinstance(x, tuple) else x,
+                key="hist_trabajador"
+            )
+        
         with col2:
-            fecha_inicio = st.date_input("Fecha inicio:", get_mexico_date() - timedelta(days=30), key="hist_inicio_asist")
+            fecha_inicio = st.date_input("Fecha inicio:", datetime.now().date() - timedelta(days=30), key="hist_inicio_asist")
+        
         with col3:
-            fecha_fin = st.date_input("Fecha fin:", get_mexico_date(), key="hist_fin_asist")
-        if st.button("🔍 Buscar Registros", key="btn_buscar_historial", use_container_width=True):
+            fecha_fin = st.date_input("Fecha fin:", datetime.now().date(), key="hist_fin_asist")
+        
+        tipos_evento = ["Todos", "entrada_invernadero", "salida_comer", "regreso_comida", "salida_invernadero"]
+        tipo_evento = st.selectbox("Filtrar por tipo de evento:", tipos_evento, key="tipo_evento_hist")
+        
+        if st.button("🔍 Buscar Registros", use_container_width=True):
             filtros = {}
             if trabajador_seleccionado and trabajador_seleccionado[0]:
                 filtros['trabajador_id'] = trabajador_seleccionado[0]
             filtros['fecha_inicio'] = fecha_inicio
             filtros['fecha_fin'] = fecha_fin
+            if tipo_evento != "Todos":
+                filtros['tipo_evento'] = tipo_evento
+            
             df_historial = get_registros_asistencia(filtros)
+            
             if not df_historial.empty:
+                mapeo_eventos = {
+                    'entrada_invernadero': '🚪 Entrada Invernadero',
+                    'salida_comer': '🍽️ Salida a Comer',
+                    'regreso_comida': '✅ Regreso de Comida',
+                    'salida_invernadero': '🚪 Salida Invernadero'
+                }
+                df_historial['tipo_evento'] = df_historial['tipo_evento'].map(mapeo_eventos)
+                
                 st.dataframe(df_historial, use_container_width=True)
+                
+                st.subheader("📊 Estadísticas del período")
+                col1, col2 = st.columns(2)
+                with col1:
+                    conteo_eventos = df_historial['tipo_evento'].value_counts()
+                    fig = px.bar(x=conteo_eventos.index, y=conteo_eventos.values,
+                                title='Eventos por Tipo',
+                                color=conteo_eventos.values,
+                                color_continuous_scale='viridis')
+                    st.plotly_chart(fig, use_container_width=True)
+                
+                with col2:
+                    conteo_trabajadores = df_historial['trabajador'].value_counts().head(10)
+                    fig = px.bar(x=conteo_trabajadores.index, y=conteo_trabajadores.values,
+                                title='Top 10 Trabajadores por Eventos',
+                                color=conteo_trabajadores.values,
+                                color_continuous_scale='plasma')
+                    fig.update_layout(xaxis_tickangle=-45)
+                    st.plotly_chart(fig, use_container_width=True)
+                
                 output = export_to_excel(df_historial, "Historial_Asistencia")
-                st.download_button("📥 Exportar Historial", data=output, file_name=f"historial_asistencia_{get_mexico_date()}.xlsx")
+                st.download_button(
+                    "📥 Exportar Historial a Excel",
+                    data=output,
+                    file_name=f"historial_asistencia_{datetime.now().date()}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
             else:
-                st.info("No se encontraron registros")
+                st.info("No se encontraron registros con los filtros seleccionados")
+    
     with tab4:
-        st.subheader("💤 Registrar Descanso")
+        st.subheader("💤 Registrar Descanso de Trabajador")
+        
         col1, col2 = st.columns(2)
+        
         with col1:
             trabajadores = get_all_workers()
-            trabajador_seleccionado = st.selectbox("Seleccionar trabajador:", trabajadores.apply(lambda x: f"{x['id']} - {x['nombre']} {x['apellido_paterno']}", axis=1) if not trabajadores.empty else [], key="descanso_trabajador_select")
-            trabajador_id = int(trabajador_seleccionado.split(' - ')[0]) if trabajador_seleccionado else None
+            if not trabajadores.empty:
+                trabajador_seleccionado = st.selectbox(
+                    "Seleccionar trabajador:",
+                    trabajadores.apply(lambda x: f"{x['id']} - {x['nombre']} {x['apellido_paterno']}", axis=1),
+                    key="descanso_trabajador"
+                )
+                trabajador_id = int(trabajador_seleccionado.split(' - ')[0]) if trabajador_seleccionado else None
+            else:
+                trabajador_id = None
+        
         with col2:
-            fecha_descanso = st.date_input("Fecha de descanso:", get_mexico_date(), key="fecha_descanso")
-        tipo_descanso = st.selectbox("Tipo de Descanso:", ["Descanso", "Vacaciones", "Permiso", "Enfermedad", "Capacitación", "Otro"], key="tipo_descanso_select")
-        observaciones = st.text_area("Observaciones:", key="obs_descanso")
-        if st.button("✅ Registrar Descanso", key="btn_registrar_descanso", type="primary", use_container_width=True):
-            if trabajador_id:
+            fecha_descanso = st.date_input("Fecha de descanso:", datetime.now().date(), key="fecha_descanso")
+        
+        tipo_descanso = st.selectbox(
+            "Tipo de Descanso:",
+            ["Vacaciones", "Permiso", "Enfermedad", "Día de asueto", "Capacitación", "Otro"],
+            key="tipo_descanso"
+        )
+        
+        observaciones = st.text_area("Observaciones:", placeholder="Motivo del descanso...", key="obs_descanso")
+        
+        if st.button("✅ Registrar Descanso", type="primary", use_container_width=True):
+            if not trabajador_id:
+                st.error("Seleccione un trabajador")
+            else:
                 success, msg = registrar_descanso(trabajador_id, fecha_descanso, tipo_descanso, observaciones)
                 if success:
                     st.success(msg)
                     st.balloons()
                 else:
                     st.error(msg)
-            else:
-                st.error("Seleccione un trabajador")
-    with tab5:
-        st.subheader("⚠️ Registro de Incidencias")
-        st.markdown("""
-        <div style="background-color: #fff3cd; padding: 15px; border-radius: 10px; margin-bottom: 20px;">
-        <strong>📌 Tipos de Incidencias:</strong><br>
-        • <strong>Enfermedad</strong> - Incapacidad médica o enfermedad<br>
-        • <strong>Permiso Justificado</strong> - Permiso con justificación<br>
-        • <strong>Permiso Injustificado</strong> - Permiso sin justificación<br>
-        • <strong>Retardo</strong> - Llegada tarde al trabajo<br>
-        • <strong>Falta Justificada</strong> - Falta con justificación<br>
-        • <strong>Falta Injustificada</strong> - Falta sin justificación<br>
-        • <strong>Otra</strong> - Otro tipo de incidencia
-        </div>
-        """, unsafe_allow_html=True)
-        with st.form("form_incidencia"):
-            col1, col2 = st.columns(2)
-            with col1:
-                trabajadores = get_all_workers()
-                if not trabajadores.empty:
-                    trabajador_incidencia = st.selectbox("👤 Seleccionar trabajador *", trabajadores.apply(lambda x: f"{x['id']} - {x['nombre']} {x['apellido_paterno']} ({x['puesto']})", axis=1), key="incidencia_trabajador_select")
-                    trabajador_id = int(trabajador_incidencia.split(' - ')[0]) if trabajador_incidencia else None
-                else:
-                    trabajador_id = None
-                    st.warning("No hay trabajadores registrados")
-            with col2:
-                fecha_incidencia = st.date_input("📅 Fecha de incidencia *", get_mexico_date(), key="fecha_incidencia")
-            tipo_incidencia = st.selectbox("📌 Tipo de Incidencia *", ["Enfermedad", "Permiso Justificado", "Permiso Injustificado", "Retardo", "Falta Justificada", "Falta Injustificada", "Otra"], key="tipo_incidencia_select")
-            subtipo = None
-            horas_afectadas = 0.0
-            if tipo_incidencia == "Enfermedad":
-                subtipo = st.selectbox("🩺 Tipo de enfermedad", ["General", "Accidente", "Incapacidad", "Consulta médica", "Covid-19", "Gripe", "Gastrointestinal", "Otro"], key="subtipo_enfermedad")
-                horas_afectadas = st.number_input("⏱️ Horas afectadas", min_value=0.0, max_value=24.0, step=0.5, key="horas_afectadas")
-            elif tipo_incidencia in ["Permiso Justificado", "Permiso Injustificado"]:
-                horas_afectadas = st.number_input("⏱️ Horas afectadas", min_value=0.0, max_value=24.0, step=0.5, key="horas_afectadas")
-                if tipo_incidencia == "Permiso Justificado":
-                    subtipo = st.selectbox("📄 Tipo de permiso", ["Personal", "Trámite", "Familiar", "Cita médica", "Otro"], key="subtipo_permiso")
-            elif tipo_incidencia == "Retardo":
-                minutos_retardo = st.number_input("⏰ Minutos de retardo", min_value=0, max_value=480, step=5, key="minutos_retardo")
-                horas_afectadas = minutos_retardo / 60.0
-                subtipo = f"{minutos_retardo} minutos"
-            elif tipo_incidencia in ["Falta Justificada", "Falta Injustificada"]:
-                horas_afectadas = st.number_input("⏱️ Horas afectadas (día completo = 8)", min_value=0.0, max_value=24.0, step=0.5, key="horas_afectadas", value=8.0)
-            justificada = st.checkbox("📋 ¿Incidencia justificada?", key="incidencia_justificada")
-            observaciones = st.text_area("📝 Observaciones", placeholder="Detalles adicionales sobre la incidencia...", key="obs_incidencia")
-            registrado_por = st.text_input("✍️ Registrado por", placeholder="Nombre de quien registra la incidencia", key="registrado_por")
-            if st.form_submit_button("✅ Registrar Incidencia", type="primary", use_container_width=True):
-                if not trabajador_id:
-                    st.error("❌ Seleccione un trabajador")
-                elif not registrado_por:
-                    st.error("❌ Ingrese quién registra la incidencia")
-                else:
-                    success, msg = registrar_incidencia(trabajador_id, fecha_incidencia, tipo_incidencia, subtipo, horas_afectadas, justificada, observaciones, registrado_por)
-                    if success:
-                        st.success(msg)
-                        st.balloons()
-                        st.rerun()
-                    else:
-                        st.error(msg)
+        
         st.markdown("---")
-        st.subheader("📊 Estadísticas de Incidencias")
+        st.subheader("📋 Historial de Descansos")
+        
         col1, col2 = st.columns(2)
         with col1:
-            fecha_inc_inicio = st.date_input("Fecha inicio:", get_mexico_date() - timedelta(days=30), key="inc_inicio")
+            fecha_desc_inicio = st.date_input("Fecha inicio:", datetime.now().date() - timedelta(days=90), key="desc_inicio")
         with col2:
-            fecha_inc_fin = st.date_input("Fecha fin:", get_mexico_date(), key="inc_fin")
-        resumen_inc = get_resumen_incidencias(fecha_inc_inicio, fecha_inc_fin)
-        if not resumen_inc['resumen_tipo'].empty:
-            col1, col2 = st.columns(2)
-            with col1:
-                fig = px.pie(resumen_inc['resumen_tipo'], values='cantidad', names='tipo_incidencia', title='Distribución por Tipo de Incidencia', color_discrete_sequence=px.colors.qualitative.Set2)
-                fig.update_traces(textposition='inside', textinfo='percent+label')
-                st.plotly_chart(fig, use_container_width=True)
-            with col2:
-                fig = px.bar(resumen_inc['resumen_tipo'], x='tipo_incidencia', y='cantidad', title='Cantidad de Incidencias por Tipo', color='tipo_incidencia', text='cantidad')
-                fig.update_traces(texttemplate='%{text}', textposition='outside')
-                fig.update_layout(showlegend=False)
-                st.plotly_chart(fig, use_container_width=True)
-        st.markdown("---")
-        st.subheader("📋 Historial de Incidencias")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            fecha_hist_inc_inicio = st.date_input("Fecha inicio histórico:", fecha_inc_inicio, key="hist_inc_inicio")
-        with col2:
-            fecha_hist_inc_fin = st.date_input("Fecha fin histórico:", fecha_inc_fin, key="hist_inc_fin")
-        with col3:
-            trabajadores = get_all_workers()
-            trabajadores_inc = [("", "Todos")] + [(row['id'], f"{row['nombre']} {row['apellido_paterno']}") for _, row in trabajadores.iterrows()] if not trabajadores.empty else [("", "Todos")]
-            filtro_trabajador_inc = st.selectbox("Filtrar por trabajador:", trabajadores_inc, format_func=lambda x: x[1] if isinstance(x, tuple) else x, key="filtro_trabajador_inc")
-        trabajador_id_filtro = filtro_trabajador_inc[0] if filtro_trabajador_inc and filtro_trabajador_inc[0] else None
-        incidencias = get_incidencias(fecha_hist_inc_inicio, fecha_hist_inc_fin, trabajador_id_filtro)
-        if not incidencias.empty:
-            incidencias_display = incidencias.copy()
-            incidencias_display['fecha'] = pd.to_datetime(incidencias_display['fecha']).dt.strftime('%d/%m/%Y')
-            incidencias_display['justificada'] = incidencias_display['justificada'].map({1: '✅ Sí', 0: '❌ No'})
-            st.dataframe(incidencias_display[['fecha', 'trabajador', 'tipo_incidencia', 'subtipo', 'horas_afectadas', 'justificada', 'observaciones', 'registrado_por']], use_container_width=True)
-            output = export_to_excel(incidencias, "Incidencias")
-            st.download_button("📥 Exportar Incidencias a Excel", data=output, file_name=f"incidencias_{get_mexico_date()}.xlsx")
+            fecha_desc_fin = st.date_input("Fecha fin:", datetime.now().date(), key="desc_fin")
+        
+        descansos = get_descansos(fecha_desc_inicio, fecha_desc_fin)
+        
+        if not descansos.empty:
+            st.dataframe(descansos, use_container_width=True)
+            
+            output = export_to_excel(descansos, "Descansos")
+            st.download_button(
+                "📥 Exportar Descansos a Excel",
+                data=output,
+                file_name=f"descansos_{datetime.now().date()}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
         else:
-            st.info("No hay registros de incidencias en el período seleccionado")
+            st.info("No hay registros de descansos en el período seleccionado")
 
-def mostrar_avance_cosecha():
-    st.header("📊 Registro de Avance de Cosecha")
-    st.markdown("""
-    <div style="background-color: #e8f5e9; padding: 15px; border-radius: 10px; margin-bottom: 20px;">
-        <strong>📌 Información:</strong><br>
-        • Invernaderos 1 al 8: <strong>40 líneas</strong> cada uno<br>
-        • Invernaderos 9 al 11: <strong>36 líneas</strong> cada uno<br>
-        • Turnos disponibles: Reporte 10:00am, 12:00pm, 02:00pm, 03:00pm, 04:00pm, 05:00pm, 06:00pm, 07:00pm, 08:00pm
-    </div>
-    """, unsafe_allow_html=True)
-    tab1, tab2 = st.tabs(["📝 Registrar Avance", "📊 Historial de Avance"])
-    with tab1:
-        st.subheader("Registrar Avance Diario")
-        fecha_actual = get_mexico_date()
-        fecha_formateada = fecha_actual.strftime("%Y/%m/%d")
-        hora_actual = get_mexico_time().strftime("%H:%M")
-        semana_actual = get_mexico_week()
-        col_fecha, col_hora, col_semana = st.columns(3)
-        with col_fecha:
-            st.markdown(f'<div class="date-card"><div style="font-size: 12px;">📅 FECHA DEL REGISTRO</div><div style="font-size: 24px; font-weight: bold;">{fecha_formateada}</div></div>', unsafe_allow_html=True)
-        with col_hora:
-            st.markdown(f'<div class="time-card"><div style="font-size: 12px;">⏰ HORA DEL REGISTRO</div><div style="font-size: 24px; font-weight: bold;">{hora_actual}</div></div>', unsafe_allow_html=True)
-        with col_semana:
-            st.markdown(f'<div class="week-card"><div style="font-size: 12px;">📆 SEMANA</div><div style="font-size: 24px; font-weight: bold;">{semana_actual}</div></div>', unsafe_allow_html=True)
-        st.markdown("---")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            invernaderos = get_invernaderos_usuario()  # Usar solo invernaderos asignados
-            if invernaderos:
-                invernadero_seleccionado = st.selectbox("Seleccionar Invernadero *", invernaderos, format_func=lambda x: f"{x[1]} - {x[2]}", key="invernadero_avance")
-                invernadero_id = invernadero_seleccionado[0]
-                invernadero_nombre = invernadero_seleccionado[1]
-                lineas_totales = get_lineas_totales_por_invernadero(invernadero_id, invernadero_nombre)
-                st.info(f"📏 Total de líneas en {invernadero_nombre}: {lineas_totales}")
+# ==========================================
+# INTERFAZ DE COSECHA
+# ==========================================
+
+def formulario_cosecha():
+    st.header("🌾 Registro de Cosecha")
+    
+    if 'clams_value' not in st.session_state:
+        st.session_state.clams_value = 0.0
+    if 'presentacion_actual' not in st.session_state:
+        st.session_state.presentacion_actual = "6 oz"
+    if 'cajas_calculadas' not in st.session_state:
+        st.session_state.cajas_calculadas = 0.0
+    
+    def calcular_cajas():
+        clams = st.session_state.clams_value
+        if st.session_state.presentacion_actual == "12 oz":
+            st.session_state.cajas_calculadas = clams / 12 if clams > 0 else 0
+        else:
+            st.session_state.cajas_calculadas = clams / 6 if clams > 0 else 0
+    
+    st.subheader("📱 Escaneo de Código QR")
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        qr_input = st.text_input("Escanear QR (ID|Nombre|Puesto)", 
+                                 placeholder="Ej: 1|Juan Pérez|Operario",
+                                 key="qr_input_cosecha")
+    with col2:
+        if st.button("🔍 Buscar Trabajador", key="buscar_cosecha", use_container_width=True):
+            if qr_input:
+                try:
+                    partes = qr_input.split('|')
+                    if len(partes) >= 2:
+                        trabajador_id = partes[0]
+                        trabajador = get_worker_by_id(trabajador_id)
+                        if trabajador:
+                            st.session_state['trabajador_seleccionado'] = trabajador
+                            st.success(f"Trabajador encontrado: {trabajador['nombre']} {trabajador['apellido_paterno']}")
+                        else:
+                            st.error("Trabajador no encontrado")
+                except Exception as e:
+                    st.error(f"Error al procesar QR: {str(e)}")
+    
+    if 'trabajador_seleccionado' in st.session_state:
+        trabajador = st.session_state['trabajador_seleccionado']
+        st.info(f"**Trabajador:** {trabajador['nombre']} {trabajador['apellido_paterno']}\n\n**Puesto:** {trabajador['puesto_nombre']}")
+    
+    st.markdown("---")
+    
+    st.subheader("📅 Información de Fecha")
+    fecha_actual = datetime.now()
+    dias_espanol = {
+        'Monday': 'Lunes', 'Tuesday': 'Martes', 'Wednesday': 'Miércoles',
+        'Thursday': 'Jueves', 'Friday': 'Viernes', 'Saturday': 'Sábado',
+        'Sunday': 'Domingo'
+    }
+    dia_espanol = dias_espanol[fecha_actual.strftime('%A')]
+    
+    col_fecha1, col_fecha2, col_fecha3 = st.columns(3)
+    with col_fecha1:
+        st.write(f"**Fecha:** {fecha_actual.strftime('%d/%m/%Y')}")
+    with col_fecha2:
+        st.write(f"**Día:** {dia_espanol}")
+    with col_fecha3:
+        st.write(f"**Semana:** {fecha_actual.isocalendar()[1]}")
+    
+    st.markdown("---")
+    
+    st.subheader("📦 Tipo de Cosecha")
+    tipo_cosecha = st.radio("Seleccionar:", ["Nacional", "Exportación"], horizontal=True, key="tipo_cosecha_radio")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        if tipo_cosecha == "Nacional":
+            calidad = st.selectbox("Calidad:", ["Salmon", "Sobretono"], key="calidad_select")
+        else:
+            calidad = None
+    
+    with col2:
+        if tipo_cosecha == "Exportación":
+            presentacion = st.selectbox("Presentación:", ["6 oz", "12 oz"], key="presentacion_select", on_change=calcular_cajas)
+            st.session_state.presentacion_actual = presentacion
+        else:
+            presentacion = "6 oz"
+            st.session_state.presentacion_actual = "6 oz"
+            st.info("Presentación automática: 6 oz")
+    
+    st.markdown("---")
+    
+    st.subheader("🔢 Módulo")
+    modulo = st.radio("Seleccionar módulo:", list(range(1, 12)), horizontal=True, key="modulo_radio")
+    
+    st.markdown("---")
+    
+    st.subheader("📊 Cantidades")
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        cantidad_clams = st.number_input(
+            "Cantidad de Clams:", 
+            min_value=0.0, 
+            value=st.session_state.clams_value, 
+            step=1.0,
+            key="clams_input_cosecha",
+            on_change=calcular_cajas
+        )
+        st.session_state.clams_value = cantidad_clams
+    
+    with col2:
+        st.text_input("Número de Cajas:", value=f"{st.session_state.cajas_calculadas:.2f}", disabled=True, key="cajas_display")
+    
+    st.markdown("---")
+    
+    with st.form("form_cosecha"):
+        st.write("### Confirmar Registro")
+        st.write("Verifica que los datos sean correctos antes de guardar.")
+        
+        st.info(f"""
+        **Resumen de la cosecha:**
+        - Trabajador: {st.session_state.get('trabajador_seleccionado', {}).get('nombre', 'No seleccionado')} {st.session_state.get('trabajador_seleccionado', {}).get('apellido_paterno', '')}
+        - Tipo: {tipo_cosecha}
+        - Presentación: {st.session_state.presentacion_actual}
+        - Cantidad de Clams: {st.session_state.clams_value:.2f}
+        - Número de Cajas: {st.session_state.cajas_calculadas:.2f}
+        - Módulo: {modulo if modulo else 'No seleccionado'}
+        """)
+        
+        if st.form_submit_button("💾 Guardar Cosecha", use_container_width=True, type="primary"):
+            if 'trabajador_seleccionado' not in st.session_state:
+                st.error("Por favor, escanee un código QR o seleccione un trabajador")
+            elif not modulo:
+                st.error("Por favor, seleccione un módulo")
+            elif st.session_state.clams_value <= 0:
+                st.error("Por favor, ingrese una cantidad válida de clams")
             else:
-                st.error("No tienes invernaderos asignados para hoy")
-                invernadero_id = None
-                invernadero_nombre = None
-                lineas_totales = 0
-        with col2:
-            supervisor = st.text_input("Nombre del Supervisor *", placeholder="Ingrese su nombre", key="supervisor_avance")
-        with col3:
-            turno = st.selectbox("Turno *", REPORTE_TURNOS, key="turno_avance")
-        st.markdown("---")
-        if invernadero_id:
-            ultimo_avance = get_ultimo_avance_dia(invernadero_id)
-            if ultimo_avance:
-                st.info(f"📊 **Avance actual del día ({invernadero_nombre}):**\n- Líneas cosechadas: **{ultimo_avance['lineas_cosechadas']}** de {lineas_totales}\n- Porcentaje: **{ultimo_avance['porcentaje']:.1f}%**\n- Última actualización: **{ultimo_avance['hora']}** (Turno: {ultimo_avance['turno']})")
-                lineas_restantes = lineas_totales - ultimo_avance['lineas_cosechadas']
-                if lineas_restantes > 0:
-                    st.warning(f"💡 Faltan {lineas_restantes} líneas por cosechar para completar el día")
-            else:
-                st.success(f"✨ Primer registro del día para {invernadero_nombre}. ¡Comienza desde 0!")
-        col1, col2 = st.columns(2)
-        with col1:
-            valor_inicial = ultimo_avance['lineas_cosechadas'] if invernadero_id and ultimo_avance else 0
-            lineas_cosechadas = st.number_input("Líneas Cosechadas *", min_value=0, max_value=lineas_totales, value=valor_inicial, step=1, key="lineas_cosechadas")
-        with col2:
-            if lineas_totales > 0:
-                porcentaje_calculado = (lineas_cosechadas / lineas_totales) * 100
-                st.metric("Porcentaje de Avance", f"{porcentaje_calculado:.1f}%")
-                if ultimo_avance and lineas_cosechadas < ultimo_avance['lineas_cosechadas']:
-                    st.warning("⚠️ El valor ingresado es menor que el registro anterior. ¿Es correcto?")
-        observaciones = st.text_area("Observaciones (opcional)", placeholder="Notas adicionales sobre el avance...", key="obs_avance")
-        if st.button("✅ Registrar Avance", type="primary", use_container_width=True, key="btn_registrar_avance"):
-            if not invernadero_id:
-                st.error("❌ Seleccione un invernadero")
-            elif not supervisor:
-                st.error("❌ Ingrese el nombre del supervisor")
-            elif lineas_cosechadas <= 0:
-                st.error("❌ Ingrese la cantidad de líneas cosechadas")
-            elif ultimo_avance and lineas_cosechadas < ultimo_avance['lineas_cosechadas']:
-                st.error("❌ El avance no puede disminuir. Si hubo un error, use el historial para corregir.")
-            else:
-                success, msg = registrar_avance_cosecha(invernadero_id, invernadero_nombre, lineas_cosechadas, supervisor, observaciones, turno)
+                data = {
+                    'fecha': fecha_actual.date(),
+                    'dia': dia_espanol,
+                    'semana': fecha_actual.isocalendar()[1],
+                    'trabajador_id': st.session_state['trabajador_seleccionado']['id'],
+                    'modulo': modulo,
+                    'tipo_cosecha': tipo_cosecha,
+                    'calidad': calidad,
+                    'presentacion': st.session_state.presentacion_actual,
+                    'cantidad_clams': float(st.session_state.clams_value),
+                    'numero_cajas': float(st.session_state.cajas_calculadas)
+                }
+                
+                success, msg = guardar_cosecha(data)
                 if success:
                     st.success(msg)
                     st.balloons()
+                    if 'trabajador_seleccionado' in st.session_state:
+                        del st.session_state['trabajador_seleccionado']
+                    st.session_state.clams_value = 0.0
+                    st.session_state.cajas_calculadas = 0.0
                     st.rerun()
                 else:
                     st.error(msg)
-    with tab2:
-        st.subheader("Historial de Avance de Cosecha")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            fecha_hist_inicio = st.date_input("Fecha inicio:", get_mexico_date() - timedelta(days=30), key="avance_hist_inicio")
-        with col2:
-            fecha_hist_fin = st.date_input("Fecha fin:", get_mexico_date(), key="avance_hist_fin")
-        with col3:
-            turno_filtro = st.selectbox("Filtrar por turno:", ["Todos"] + REPORTE_TURNOS, key="turno_filtro_hist")
-        turno_param = None if turno_filtro == "Todos" else turno_filtro
-        df_avance = get_avance_historico_por_dia(fecha_hist_inicio, fecha_hist_fin, turno=turno_param)
-        if not df_avance.empty:
-            df_display = df_avance.copy()
-            df_display['fecha'] = pd.to_datetime(df_display['fecha']).dt.strftime('%d/%m/%Y')
-            df_display['porcentaje'] = df_display['porcentaje'].map(lambda x: f"{x:.1f}%")
-            st.dataframe(df_display[['fecha', 'hora', 'turno', 'invernadero_nombre', 'lineas_cosechadas', 'lineas_totales', 'porcentaje', 'supervisor', 'observaciones']], use_container_width=True)
-            output = export_to_excel(df_avance, "Avance_Cosecha_Historico")
-            st.download_button("📥 Exportar Historial a Excel", data=output, file_name=f"avance_cosecha_historico_{get_mexico_date()}.xlsx")
-            if not df_avance.empty:
-                st.subheader("📈 Evolución del Avance por Día")
-                fig = px.line(df_avance, x='fecha', y='porcentaje', color='invernadero_nombre', title='Evolución del Porcentaje de Avance por Día', labels={'fecha': 'Fecha', 'porcentaje': 'Porcentaje (%)', 'invernadero_nombre': 'Invernadero'}, markers=True)
-                fig.update_layout(plot_bgcolor='white', height=500)
-                st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("No hay registros de avance en el período seleccionado")
 
-def mostrar_traslados_camara_fria():
-    st.header("❄️ Traslado a Cámara Fría")
-    tab1, tab2, tab3, tab4 = st.tabs(["📦 Registrar Traslado", "⚖️ Registro de Pesaje", "📋 Comparativa Cosecha vs Traslado vs Pesaje", "📋 Historial"])
-    with tab1:
-        st.subheader("Registrar Traslado de Cajas a Cámara Fría")
-        fecha_actual = get_mexico_date()
-        hora_actual = get_mexico_time().strftime("%H:%M")
-        fecha_formateada = fecha_actual.strftime("%Y/%m/%d")
-        semana_actual = get_mexico_week()
-        col_fecha, col_hora, col_semana = st.columns(3)
-        with col_fecha:
-            st.markdown(f'<div class="date-card"><div style="font-size: 12px;">📅 FECHA DEL TRASLADO</div><div style="font-size: 24px; font-weight: bold;">{fecha_formateada}</div></div>', unsafe_allow_html=True)
-        with col_hora:
-            st.markdown(f'<div class="time-card"><div style="font-size: 12px;">⏰ HORA DEL TRASLADO</div><div style="font-size: 24px; font-weight: bold;">{hora_actual}</div></div>', unsafe_allow_html=True)
-        with col_semana:
-            st.markdown(f'<div class="week-card"><div style="font-size: 12px;">📆 SEMANA</div><div style="font-size: 24px; font-weight: bold;">{semana_actual}</div></div>', unsafe_allow_html=True)
-        st.markdown("---")
-        col1, col2 = st.columns(2)
-        with col1:
-            invernaderos = get_invernaderos_usuario()  # Usar solo invernaderos asignados
-            if invernaderos:
-                invernadero_seleccionado = st.selectbox("🏭 Invernadero de origen:", invernaderos, format_func=lambda x: f"{x[1]} - {x[2]}", key="invernadero_traslado")
-                invernadero_id = invernadero_seleccionado[0]
-            else:
-                st.error("No tienes invernaderos asignados para hoy")
-                invernadero_id = None
-        with col2:
-            if invernadero_id:
-                detalle_cajas = get_detalle_cajas_por_invernadero_presentacion(invernadero_id)
-                total_cajas = detalle_cajas['6 oz'] + detalle_cajas['12 oz']
-                st.markdown(f'<div style="background-color: #e8f4fd; padding: 15px; border-radius: 10px;"><h4 style="margin: 0 0 10px 0;">📦 Inventario en {invernadero_seleccionado[1]}</h4><p><strong>Total cajas disponibles:</strong> {total_cajas:.0f}</p><hr><p>🍓 <strong>Cajas 6 oz:</strong> {detalle_cajas["6 oz"]:.0f} cajas</p><p>🍓 <strong>Cajas 12 oz:</strong> {detalle_cajas["12 oz"]:.0f} cajas</p></div>', unsafe_allow_html=True)
-                if total_cajas == 0:
-                    st.warning("⚠️ No hay cajas disponibles en este invernadero")
-        st.markdown("---")
-        col1, col2 = st.columns(2)
-        with col1:
-            st.subheader("👤 Supervisor que entrega las cajas")
-            trabajadores = get_all_workers()
-            if not trabajadores.empty:
-                supervisores = trabajadores[trabajadores['puesto'].str.contains('Supervisor', case=False, na=False)]
-                if not supervisores.empty:
-                    supervisor_envia = st.selectbox("Supervisor:", supervisores.apply(lambda x: f"{x['id']} - {x['nombre']} {x['apellido_paterno']} ({x['puesto']})", axis=1), key="supervisor_envia")
-                    supervisor_envia_id = int(supervisor_envia.split(' - ')[0]) if supervisor_envia else None
-                else:
-                    st.warning("No hay supervisores registrados")
-                    supervisor_envia_id = None
-            else:
-                supervisor_envia_id = None
-        with col2:
-            st.subheader("👤 Recolector (quien lleva las cajas)")
-            recolectores = get_recolectores()
-            if recolectores:
-                recolector = st.selectbox("Recolector:", recolectores, format_func=lambda x: x[1], key="recolector_traslado")
-                recolector_id = recolector[0] if recolector else None
-            else:
-                st.warning("No hay recolectores registrados")
-                recolector_id = None
-        st.markdown("---")
-        col1, col2 = st.columns(2)
-        with col1:
-            tipo_envio = st.selectbox("📦 Tipo de Envío:", ["Nacional", "Exportación"], key="tipo_envio_select")
-        with col2:
-            presentacion = st.selectbox("📏 Presentación:", ["6 oz", "12 oz"], key="presentacion_traslado")
-        cantidad_cajas = st.number_input("📊 Cantidad de Cajas a trasladar:", min_value=0.0, step=1.0, key="cantidad_traslado")
-        lote = st.text_input("🏷️ Número de Lote (opcional):", placeholder="Ej: L-2024-001", key="lote_traslado")
-        observaciones = st.text_area("📝 Observaciones:", placeholder="Ej: Calidad premium, primera selección, etc.", key="obs_traslado")
-        if invernadero_id and cantidad_cajas > 0:
-            detalle_cajas = get_detalle_cajas_por_invernadero_presentacion(invernadero_id)
-            cajas_disponibles_por_tipo = detalle_cajas.get(presentacion, 0)
-            if cantidad_cajas > cajas_disponibles_por_tipo:
-                st.warning(f"⚠️ Solo hay {cajas_disponibles_por_tipo:.0f} cajas de {presentacion} disponibles en este invernadero")
-        if st.button("✅ Registrar Traslado a Cámara Fría", type="primary", use_container_width=True, key="btn_registrar_traslado"):
-            if not invernadero_id:
-                st.error("Seleccione un invernadero de origen")
-            elif not supervisor_envia_id:
-                st.error("Seleccione el supervisor que entrega las cajas")
-            elif not recolector_id:
-                st.error("Seleccione el recolector que lleva las cajas")
-            elif cantidad_cajas <= 0:
-                st.error("Ingrese una cantidad válida de cajas")
-            else:
-                detalle_cajas = get_detalle_cajas_por_invernadero_presentacion(invernadero_id)
-                cajas_disponibles_por_tipo = detalle_cajas.get(presentacion, 0)
-                if cantidad_cajas > cajas_disponibles_por_tipo:
-                    st.error(f"❌ No hay suficientes cajas de {presentacion}. Disponibles: {cajas_disponibles_por_tipo:.0f}")
-                else:
-                    success, msg = registrar_traslado_camara_fria(invernadero_id, cantidad_cajas, supervisor_envia_id, recolector_id, tipo_envio, presentacion, lote, observaciones)
-                    if success:
-                        st.success(msg)
-                        st.balloons()
-                        st.rerun()
-                    else:
-                        st.error(msg)
-    with tab2:
-        st.subheader("⚖️ Registro de Pesaje de Cajas")
-        traslados_pendientes = get_traslados_camara_fria(fecha_inicio=get_mexico_date(), fecha_fin=get_mexico_date())
-        if not traslados_pendientes.empty:
-            traslado = st.selectbox("Seleccionar traslado a pesar:", traslados_pendientes.apply(lambda x: f"ID:{x['id']} - {x['invernadero']} - {x['cantidad_cajas']} cajas de {x['presentacion']}", axis=1), key="pesaje_traslado")
-            traslado_id = int(traslado.split(' - ')[0].replace('ID:', '')) if traslado else None
-            if traslado_id:
-                traslado_data = traslados_pendientes[traslados_pendientes['id'] == traslado_id].iloc[0]
-                st.info(f"📦 **Detalle del traslado:**\n- Invernadero: {traslado_data['invernadero']}\n- Cajas trasladadas: {traslado_data['cantidad_cajas']:.0f} de {traslado_data['presentacion']}\n- Supervisor: {traslado_data['trabajador_envia']}\n- Recolector: {traslado_data['recolector']}\n- Hora: {traslado_data['hora']}")
-                col1, col2 = st.columns(2)
-                with col1:
-                    cantidad_pesadas = st.number_input("Cantidad de cajas pesadas:", min_value=0.0, step=1.0, value=float(traslado_data['cantidad_cajas']), key="pesadas")
-                with col2:
-                    cajas_recibidas = st.number_input("Cajas recibidas en frío:", min_value=0.0, step=1.0, value=float(traslado_data['cantidad_cajas']), key="recibidas")
-                diferencia = cantidad_pesadas - cajas_recibidas
-                if diferencia != 0:
-                    if diferencia > 0:
-                        st.warning(f"⚠️ Diferencia: Sobran {diferencia:.0f} cajas")
-                    else:
-                        st.warning(f"⚠️ Diferencia: Faltan {abs(diferencia):.0f} cajas")
-                else:
-                    st.success("✅ Coincidencia perfecta")
-                nota = st.text_area("Nota (explicar diferencia):", placeholder="Ej: Merma por fruta dañada, cajas incompletas, etc.", key="nota_pesaje")
-                pesadores = get_pesadores()
-                if pesadores:
-                    pesador = st.selectbox("Pesador:", pesadores, format_func=lambda x: x[1], key="pesador_select")
-                    pesador_id = pesador[0] if pesador else None
-                else:
-                    st.warning("No hay pesadores registrados")
-                    pesador_id = None
-                if st.button("✅ Registrar Pesaje", type="primary", use_container_width=True):
-                    if pesador_id:
-                        success, msg = registrar_pesaje_cajas(traslado_id, traslado_data['invernadero_id'], pesador_id, traslado_data['presentacion'], cantidad_pesadas, cajas_recibidas, nota)
-                        if success:
-                            st.success(msg)
-                            st.balloons()
-                            st.rerun()
-                        else:
-                            st.error(msg)
-                    else:
-                        st.error("Seleccione un pesador")
-        else:
-            st.info("No hay traslados pendientes de pesar hoy")
-        st.markdown("---")
-        st.subheader("📊 Resumen de Pesajes del Día")
-        pesajes_hoy = get_pesajes(fecha_inicio=get_mexico_date(), fecha_fin=get_mexico_date())
-        if not pesajes_hoy.empty:
-            st.dataframe(pesajes_hoy, use_container_width=True)
-            total_diferencia = pesajes_hoy['diferencia'].sum()
-            if total_diferencia != 0:
-                st.warning(f"📊 Diferencia total del día: {total_diferencia:+.0f} cajas")
-            else:
-                st.success("✅ Sin diferencias en los pesajes del día")
-        else:
-            st.info("No hay pesajes registrados hoy")
-    with tab3:
-        st.subheader("📊 Comparativa: Cosechado vs Trasladado vs Pesado")
-        fecha_inicio_comp = st.date_input("Fecha inicio comparativa:", get_mexico_date() - timedelta(days=30), key="comp_inicio")
-        fecha_fin_comp = st.date_input("Fecha fin comparativa:", get_mexico_date(), key="comp_fin")
-        if st.button("Actualizar Comparativa", use_container_width=True):
-            cosechas = get_cosechas(fecha_inicio_comp, fecha_fin_comp)
-            traslados = get_traslados_camara_fria(fecha_inicio_comp, fecha_fin_comp)
-            pesajes = get_pesajes(fecha_inicio_comp, fecha_fin_comp)
-            if not cosechas.empty or not traslados.empty or not pesajes.empty:
-                total_cosechado = cosechas['numero_cajas'].sum() if not cosechas.empty else 0
-                total_trasladado = traslados['cantidad_cajas'].sum() if not traslados.empty else 0
-                total_pesado = pesajes['cajas_pesadas'].sum() if not pesajes.empty else 0
-                total_recibido = pesajes['cajas_recibidas'].sum() if not pesajes.empty else 0
-                diferencia_traslado = total_cosechado - total_trasladado
-                diferencia_pesaje = total_pesado - total_recibido
-                col1, col2, col3, col4, col5 = st.columns(5)
-                with col1: st.metric("📦 Total Cosechado", f"{total_cosechado:.0f} cajas")
-                with col2: st.metric("🚚 Total Trasladado", f"{total_trasladado:.0f} cajas")
-                with col3: st.metric("⚖️ Total Pesado", f"{total_pesado:.0f} cajas")
-                with col4: st.metric("✅ Total Recibido", f"{total_recibido:.0f} cajas")
-                with col5: st.metric("📊 Diferencia Traslado", f"{diferencia_traslado:+.0f}", delta=f"{(diferencia_traslado/total_cosechado*100) if total_cosechado>0 else 0:.1f}%")
-                fig = go.Figure()
-                fechas = sorted(set(cosechas['fecha'].unique()) if not cosechas.empty else set())
-                if not cosechas.empty:
-                    df_c = cosechas.groupby('fecha')['numero_cajas'].sum().reset_index()
-                    fig.add_trace(go.Scatter(x=df_c['fecha'], y=df_c['numero_cajas'], mode='lines+markers', name='Cosechado', line=dict(color='#2ecc71', width=3)))
-                if not traslados.empty:
-                    df_t = traslados.groupby('fecha')['cantidad_cajas'].sum().reset_index()
-                    fig.add_trace(go.Scatter(x=df_t['fecha'], y=df_t['cantidad_cajas'], mode='lines+markers', name='Trasladado', line=dict(color='#3498db', width=3)))
-                if not pesajes.empty:
-                    df_p = pesajes.groupby('fecha')['cajas_pesadas'].sum().reset_index()
-                    fig.add_trace(go.Scatter(x=df_p['fecha'], y=df_p['cajas_pesadas'], mode='lines+markers', name='Pesado', line=dict(color='#e74c3c', width=3)))
-                fig.update_layout(title='Comparativa Diaria: Cosechado vs Trasladado vs Pesado', xaxis_title='Fecha', yaxis_title='Cajas', plot_bgcolor='white', height=500)
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.info("No hay datos para el período seleccionado")
-    with tab4:
-        st.subheader("📋 Historial de Traslados")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            fecha_hist_inicio = st.date_input("Fecha inicio:", get_mexico_date() - timedelta(days=30), key="hist_traslado_inicio")
-        with col2:
-            fecha_hist_fin = st.date_input("Fecha fin:", get_mexico_date(), key="hist_traslado_fin")
-        with col3:
-            invernaderos_filtro = [("", "Todos")] + [(id_inv, nombre) for id_inv, nombre, _, _ in get_all_invernaderos()]
-            invernadero_filtro = st.selectbox("Filtrar por invernadero:", invernaderos_filtro, format_func=lambda x: x[1] if isinstance(x, tuple) else x, key="invernadero_historial_traslado")
-        invernadero_id_filtro = invernadero_filtro[0] if invernadero_filtro and invernadero_filtro[0] else None
-        traslados = get_traslados_camara_fria(fecha_hist_inicio, fecha_hist_fin, invernadero_id_filtro)
-        if not traslados.empty:
-            st.dataframe(traslados, use_container_width=True)
-            output = export_to_excel(traslados, "Traslados_Camara_Fria")
-            st.download_button("📥 Exportar a Excel", data=output, file_name=f"traslados_camara_fria_{get_mexico_date()}.xlsx")
-            st.subheader("📊 Resumen de Traslados por Invernadero")
-            resumen = traslados.groupby('invernadero')['cantidad_cajas'].sum().reset_index()
-            fig = px.bar(resumen, x='invernadero', y='cantidad_cajas', title='Total de Cajas Trasladadas por Invernadero')
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("No hay traslados registrados")
+# ==========================================
+# REPORTES
+# ==========================================
 
-def mostrar_gestion_merma():
-    st.header("🗑️ Gestión de Merma")
-    tab1, tab2, tab3 = st.tabs(["📝 Registrar Merma", "📊 Dashboard Merma", "📋 Historial"])
-    with tab1:
-        st.subheader("Registrar Merma")
-        fecha_actual = get_mexico_date()
-        fecha_formateada = fecha_actual.strftime("%Y/%m/%d")
-        hora_actual = get_mexico_time().strftime("%H:%M")
-        semana_actual = get_mexico_week()
-        col_fecha, col_hora, col_semana = st.columns(3)
-        with col_fecha:
-            st.markdown(f'<div class="date-card"><div style="font-size: 12px;">📅 FECHA DEL REGISTRO</div><div style="font-size: 24px; font-weight: bold;">{fecha_formateada}</div></div>', unsafe_allow_html=True)
-        with col_hora:
-            st.markdown(f'<div class="time-card"><div style="font-size: 12px;">⏰ HORA DEL REGISTRO</div><div style="font-size: 24px; font-weight: bold;">{hora_actual}</div></div>', unsafe_allow_html=True)
-        with col_semana:
-            st.markdown(f'<div class="week-card"><div style="font-size: 12px;">📆 SEMANA</div><div style="font-size: 24px; font-weight: bold;">{semana_actual}</div></div>', unsafe_allow_html=True)
-        st.markdown("---")
-        with st.form("form_merma"):
-            col1, col2 = st.columns(2)
-            with col1:
-                invernaderos = get_invernaderos_usuario()  # Usar solo invernaderos asignados
-                if invernaderos:
-                    invernadero = st.selectbox("Invernadero *", invernaderos, format_func=lambda x: f"{x[1]} - {x[2]}", key="invernadero_merma")
-                    invernadero_id = invernadero[0]
-                else:
-                    invernadero_id = None
-                    st.error("No tienes invernaderos asignados para hoy")
-            with col2:
-                supervisor_nombre = st.text_input("Nombre del Supervisor *", key="supervisor_merma")
-            kilos_merma = st.number_input("Kilos de Merma *", min_value=0.0, step=0.5, key="kilos_merma")
-            tipo_merma = st.selectbox("Tipo de Merma", ["Seleccionar...", "Fruta dañada", "Fruta sobremadura", "Fruta con defectos", "Contaminación", "Manejo inadecuado", "Temperatura", "Plagas", "Otra"], key="tipo_merma")
-            observaciones = st.text_area("Observaciones", key="obs_merma")
-            registrado_por = st.text_input("Registrado por *", key="registrado_por_merma")
-            if st.form_submit_button("✅ Registrar Merma", type="primary", use_container_width=True):
-                if invernadero_id and supervisor_nombre and kilos_merma > 0 and tipo_merma != "Seleccionar..." and registrado_por:
-                    success, msg = registrar_merma(invernadero_id, supervisor_nombre, kilos_merma, tipo_merma, observaciones, registrado_por)
-                    if success:
-                        st.success(msg)
-                        st.balloons()
-                    else:
-                        st.error(msg)
-                else:
-                    st.error("Complete todos los campos")
-    with tab2:
-        st.subheader("Dashboard Merma")
-        col1, col2 = st.columns(2)
-        with col1:
-            fecha_inicio = st.date_input("Fecha inicio:", get_mexico_date() - timedelta(days=30), key="merma_inicio")
-        with col2:
-            fecha_fin = st.date_input("Fecha fin:", get_mexico_date(), key="merma_fin")
-        stats_merma = get_stats_merma(fecha_inicio, fecha_fin)
-        col1, col2, col3, col4 = st.columns(4)
-        with col1: st.metric("🗑️ Total Kilos", f"{stats_merma['total_merma']:,.2f} kg")
-        with col2: st.metric("📊 Promedio/Día", f"{stats_merma['total_merma'] / max(len(stats_merma['merma_diaria']), 1):.1f} kg")
-        with col3: st.metric("📝 Registros", len(stats_merma['merma_diaria']) if not stats_merma['merma_diaria'].empty else 0)
-        with col4: st.metric("🏆 Mayor Merma", stats_merma['merma_por_invernadero'].iloc[0]['invernadero_nombre'] if not stats_merma['merma_por_invernadero'].empty else "N/A")
-        if not stats_merma['merma_diaria'].empty:
-            fig = px.bar(stats_merma['merma_diaria'], x='fecha', y='kilos_merma', title='Merma Diaria')
-            st.plotly_chart(fig, use_container_width=True)
-        if not stats_merma['merma_por_tipo'].empty:
-            fig = px.pie(stats_merma['merma_por_tipo'], values='kilos_merma', names='tipo_merma', title='Merma por Tipo')
-            st.plotly_chart(fig, use_container_width=True)
-    with tab3:
-        st.subheader("Historial de Merma")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            fecha_hist_inicio = st.date_input("Fecha inicio:", get_mexico_date() - timedelta(days=30), key="merma_hist_inicio")
-        with col2:
-            fecha_hist_fin = st.date_input("Fecha fin:", get_mexico_date(), key="merma_hist_fin")
-        with col3:
-            invernaderos_filtro = [("", "Todos")] + [(id_inv, nombre) for id_inv, nombre, _, _ in get_all_invernaderos()]
-            invernadero_filtro = st.selectbox("Filtrar por invernadero:", invernaderos_filtro, format_func=lambda x: x[1] if isinstance(x, tuple) else x, key="merma_invernadero_filtro")
-        invernadero_id_filtro = invernadero_filtro[0] if invernadero_filtro and invernadero_filtro[0] else None
-        merma = get_merma(fecha_hist_inicio, fecha_hist_fin, invernadero_id_filtro)
-        if not merma.empty:
-            st.dataframe(merma, use_container_width=True)
-            output = export_to_excel(merma, "Merma")
-            st.download_button("📥 Exportar a Excel", data=output, file_name=f"merma_{get_mexico_date()}.xlsx")
+def get_report_ingresos_semana():
+    hoy = datetime.today()
+    inicio_semana = hoy - timedelta(days=hoy.weekday())
+    fin_semana = inicio_semana + timedelta(days=6)
+    
+    conn = sqlite3.connect(DB_PATH)
+    query = """
+        SELECT t.id, t.nombre, t.apellido_paterno, t.apellido_materno,
+               t.fecha_alta, COALESCE(d.nombre, 'Sin asignar') as departamento, 
+               COALESCE(s.nombre, 'Sin asignar') as subdepartamento,
+               COALESCE(p.nombre, 'Sin asignar') as puesto, 
+               t.tipo_nomina
+        FROM trabajadores t
+        LEFT JOIN departamentos d ON t.departamento_id = d.id
+        LEFT JOIN subdepartamentos s ON t.subdepartamento_id = s.id
+        LEFT JOIN puestos p ON t.puesto_id = p.id
+        WHERE t.fecha_alta BETWEEN ? AND ?
+        ORDER BY t.fecha_alta DESC
+    """
+    df = pd.read_sql_query(query, conn, params=(inicio_semana.date(), fin_semana.date()))
+    conn.close()
+    return df, inicio_semana, fin_semana
+
+def get_report_bajas_semana():
+    hoy = datetime.today()
+    inicio_semana = hoy - timedelta(days=hoy.weekday())
+    fin_semana = inicio_semana + timedelta(days=6)
+    
+    conn = sqlite3.connect(DB_PATH)
+    query = """
+        SELECT t.id, t.nombre, t.apellido_paterno, t.apellido_materno,
+               t.fecha_baja, COALESCE(d.nombre, 'Sin asignar') as departamento, 
+               COALESCE(s.nombre, 'Sin asignar') as subdepartamento,
+               COALESCE(p.nombre, 'Sin asignar') as puesto
+        FROM trabajadores t
+        LEFT JOIN departamentos d ON t.departamento_id = d.id
+        LEFT JOIN subdepartamentos s ON t.subdepartamento_id = s.id
+        LEFT JOIN puestos p ON t.puesto_id = p.id
+        WHERE t.fecha_baja IS NOT NULL
+        AND t.fecha_baja BETWEEN ? AND ?
+        ORDER BY t.fecha_baja DESC
+    """
+    df = pd.read_sql_query(query, conn, params=(inicio_semana.date(), fin_semana.date()))
+    conn.close()
+    return df, inicio_semana, fin_semana
+
+def get_report_nomina_activa(depto_nombre=None, subdepto_nombre=None):
+    conn = sqlite3.connect(DB_PATH)
+    query = """
+        SELECT t.id, t.nombre, t.apellido_paterno, t.apellido_materno,
+               COALESCE(d.nombre, 'Sin asignar') as departamento, 
+               COALESCE(s.nombre, 'Sin asignar') as subdepartamento,
+               COALESCE(p.nombre, 'Sin asignar') as puesto, 
+               t.tipo_nomina,
+               t.fecha_alta, t.telefono, t.correo
+        FROM trabajadores t
+        LEFT JOIN departamentos d ON t.departamento_id = d.id
+        LEFT JOIN subdepartamentos s ON t.subdepartamento_id = s.id
+        LEFT JOIN puestos p ON t.puesto_id = p.id
+        WHERE t.estatus = 'activo'
+    """
+    params = []
+    
+    if depto_nombre and depto_nombre != "Todos":
+        query += " AND d.nombre = ?"
+        params.append(depto_nombre)
+    
+    if subdepto_nombre and subdepto_nombre != "Todos":
+        query += " AND s.nombre = ?"
+        params.append(subdepto_nombre)
+    
+    query += " ORDER BY d.nombre, s.nombre, t.apellido_paterno"
+    
+    df = pd.read_sql_query(query, conn, params=params if params else None)
+    conn.close()
+    
+    if not df.empty:
+        resumen = df.groupby('departamento').size().reset_index(name='cantidad')
+    else:
+        resumen = pd.DataFrame(columns=['departamento', 'cantidad'])
+    
+    return df, resumen
+
+# ==========================================
+# MENÚ PRINCIPAL EN SIDEBAR
+# ==========================================
+
+def mostrar_menu_sidebar():
+    """Muestra el menú principal en el sidebar izquierdo"""
+    
+    st.sidebar.markdown("""
+    <div class="sidebar-title">
+        <h2>🌾 Sistema Integral</h2>
+        <p>Gestión Agrícola</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    menu_options = {
+        "📱 Registro Rápido": {"icon": "📱", "color": "#2ecc71", "desc": "Escanea QR y registra eventos"},
+        "🌾 Registro Cosecha": {"icon": "🌾", "color": "#f39c12", "desc": "Registrar producción"},
+        "👥 Gestión Personal": {"icon": "👥", "color": "#3498db", "desc": "Alta/baja/editar trabajadores"},
+        "📊 Dashboard": {"icon": "📊", "color": "#9b59b6", "desc": "Estadísticas generales"},
+        "🕐 Control Asistencia": {"icon": "🕐", "color": "#1abc9c", "desc": "Registro entrada/salida"},
+        "❄️ Envíos a Enfriado": {"icon": "❄️", "color": "#e74c3c", "desc": "Cajas a enfriado"},
+        "📱 Generar QR": {"icon": "📱", "color": "#34495e", "desc": "Códigos QR para trabajadores"},
+        "📋 Reportes": {"icon": "📋", "color": "#95a5a6", "desc": "Reportes y estadísticas"},
+        "📚 Catálogos": {"icon": "📚", "color": "#e67e22", "desc": "Departamentos, puestos, etc."},
+        "📈 Asistencia Stats": {"icon": "📈", "color": "#16a085", "desc": "Estadísticas asistencia"},
+        "🏭 Gestión Invernaderos": {"icon": "🏭", "color": "#27ae60", "desc": "Administrar invernaderos"}
+    }
+    
+    for option, config in menu_options.items():
+        if st.sidebar.button(
+            f"{config['icon']} {option}", 
+            use_container_width=True,
+            help=config['desc'],
+            key=f"sidebar_{option.replace(' ', '_')}"
+        ):
+            st.session_state.menu = option
+            st.rerun()
+    
+    st.sidebar.markdown("---")
+    st.sidebar.info(
+        "**Versión 3.1**\n\n"
+        "Sistema Integral de Gestión\n"
+        "© 2024"
+    )
+
+# ==========================================
+# INTERFAZ DE GESTIÓN DE INVERNADEROS
+# ==========================================
 
 def mostrar_gestion_invernaderos():
     st.header("🏭 Gestión de Invernaderos")
+    
     with st.expander("➕ Agregar Nuevo Invernadero"):
         with st.form("form_invernadero"):
-            nombre_invernadero = st.text_input("Nombre del Invernadero *", key="nombre_invernadero")
-            ubicacion_invernadero = st.text_input("Ubicación *", key="ubicacion_invernadero")
-            lineas_totales = st.number_input("Líneas totales", min_value=1, max_value=100, value=40, key="lineas_invernadero")
+            nombre_invernadero = st.text_input("Nombre del Invernadero *")
+            ubicacion_invernadero = st.text_input("Ubicación *")
+            
             if st.form_submit_button("Guardar Invernadero"):
                 if nombre_invernadero and ubicacion_invernadero:
-                    success, msg = add_invernadero(nombre_invernadero, ubicacion_invernadero, lineas_totales)
+                    success, msg = add_invernadero(nombre_invernadero, ubicacion_invernadero)
                     if success:
                         st.success(msg)
                         st.rerun()
@@ -2935,20 +2910,25 @@ def mostrar_gestion_invernaderos():
                         st.error(msg)
                 else:
                     st.error("Complete todos los campos")
+    
     st.markdown("---")
     st.subheader("Lista de Invernaderos")
-    invernaderos = get_all_invernaderos()
+    
+    invernaderos = get_invernaderos()
     if invernaderos:
-        for id_inv, nombre, ubicacion, lineas in invernaderos:
+        for id_inv, nombre, ubicacion in invernaderos:
             with st.container():
-                cols = st.columns([3, 2, 1, 1, 1])
-                with cols[0]: st.write(f"**{nombre}**")
-                with cols[1]: st.write(f"📍 {ubicacion}")
-                with cols[2]: st.write(f"📏 {lineas} líneas")
-                with cols[3]:
+                cols = st.columns([3, 1, 1])
+                
+                with cols[0]:
+                    st.write(f"**{nombre}**")
+                    st.write(f"📍 {ubicacion}")
+                
+                with cols[1]:
                     if st.button("✏️ Editar", key=f"edit_inv_{id_inv}"):
                         st.session_state[f'editing_inv_{id_inv}'] = True
-                with cols[4]:
+                
+                with cols[2]:
                     if st.button("🗑️ Eliminar", key=f"del_inv_{id_inv}"):
                         success, msg = delete_invernadero(id_inv)
                         if success:
@@ -2956,15 +2936,16 @@ def mostrar_gestion_invernaderos():
                             st.rerun()
                         else:
                             st.error(msg)
+                
                 if st.session_state.get(f'editing_inv_{id_inv}', False):
                     with st.form(key=f"form_edit_inv_{id_inv}"):
-                        nuevo_nombre = st.text_input("Nombre", value=nombre, key=f"edit_nombre_{id_inv}")
-                        nueva_ubicacion = st.text_input("Ubicación", value=ubicacion, key=f"edit_ubicacion_{id_inv}")
-                        nuevas_lineas = st.number_input("Líneas totales", value=lineas, key=f"edit_lineas_{id_inv}")
+                        nuevo_nombre = st.text_input("Nombre", value=nombre)
+                        nueva_ubicacion = st.text_input("Ubicación", value=ubicacion)
+                        
                         col1, col2 = st.columns(2)
                         with col1:
                             if st.form_submit_button("💾 Guardar"):
-                                success, msg = update_invernadero(id_inv, nuevo_nombre, nueva_ubicacion, nuevas_lineas)
+                                success, msg = update_invernadero(id_inv, nuevo_nombre, nueva_ubicacion)
                                 if success:
                                     st.success(msg)
                                     del st.session_state[f'editing_inv_{id_inv}']
@@ -2975,718 +2956,740 @@ def mostrar_gestion_invernaderos():
                             if st.form_submit_button("❌ Cancelar"):
                                 del st.session_state[f'editing_inv_{id_inv}']
                                 st.rerun()
+                
                 st.markdown("---")
     else:
         st.info("No hay invernaderos registrados")
-
-def mostrar_generar_qr():
-    st.header("🔧 Generar Códigos QR")
-    url_base = st.text_input("URL Base del Sistema", value=st.session_state.get('url_base', "https://tu-app.streamlit.app"), key="url_base_qr")
-    st.session_state.url_base = url_base
-    trabajadores = get_all_workers()
-    if not trabajadores.empty:
-        st.subheader("📱 Generar QR por Trabajador")
-        opcion = st.radio("Seleccionar:", ["Todos", "Seleccionar específicos"], key="opcion_qr")
-        if opcion == "Todos":
-            trabajadores_seleccionados = trabajadores.to_dict('records')
-        else:
-            nombres = [f"{row['id']} - {row['nombre']} {row['apellido_paterno']}" for _, row in trabajadores.iterrows()]
-            seleccionados = st.multiselect("Selecciona trabajadores", nombres, key="trabajadores_seleccionados")
-            trabajadores_seleccionados = [row for _, row in trabajadores.iterrows() if f"{row['id']} - {row['nombre']} {row['apellido_paterno']}" in seleccionados]
-        if st.button("🔄 Generar QR", use_container_width=True, key="btn_generar_qr"):
-            for trabajador in trabajadores_seleccionados:
-                id_trabajador = trabajador['id']
-                nombre_completo = f"{trabajador['nombre']} {trabajador['apellido_paterno']}"
-                qr_bytes = generar_qr_trabajador_simple(str(id_trabajador), nombre_completo, url_base)
-                col1, col2 = st.columns([1, 2])
-                with col1:
-                    st.image(qr_bytes, width=150)
-                with col2:
-                    st.write(f"**{nombre_completo}**")
-                    st.write(f"ID: {id_trabajador}")
-                    st.download_button("📥 Descargar QR", data=qr_bytes, file_name=f"QR_{id_trabajador}_{nombre_completo.replace(' ', '_')}.png", mime="image/png", key=f"download_qr_{id_trabajador}")
-        if st.button("📦 Descargar Todos en ZIP", use_container_width=True, key="btn_zip_qr"):
-            zip_buffer = io.BytesIO()
-            with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-                for _, trabajador in trabajadores.iterrows():
-                    nombre_completo = f"{trabajador['nombre']} {trabajador['apellido_paterno']}"
-                    qr_bytes = generar_qr_trabajador_simple(str(trabajador['id']), nombre_completo, url_base)
-                    zip_file.writestr(f"QR_{trabajador['id']}_{nombre_completo.replace(' ', '_')}.png", qr_bytes.getvalue())
-            zip_buffer.seek(0)
-            st.download_button("📥 Descargar ZIP", data=zip_buffer, file_name=f"todos_qr_{get_mexico_date().strftime('%Y%m%d')}.zip", mime="application/zip")
-    else:
-        st.warning("Primero agrega trabajadores en '👥 Gestión Personal'")
-
-def mostrar_reportes_qr():
-    st.header("📊 Reportes de Escaneos QR")
-    col1, col2 = st.columns([1, 3])
-    with col1:
-        fecha_filtro = st.date_input("Filtrar por fecha", value=None, key="fecha_filtro_qr")
-    try:
-        query = supabase.table('registros_escaneo').select('*')
-        if fecha_filtro:
-            query = query.eq('fecha_escaneo', fecha_filtro.strftime("%d/%m/%Y"))
-        result = query.order('fecha_registro', desc=True).execute()
-        registros = pd.DataFrame(result.data) if result.data else pd.DataFrame()
-        if not registros.empty:
-            st.dataframe(registros, use_container_width=True)
-            col1, col2, col3, col4 = st.columns(4)
-            with col1: st.metric("Total Registros", len(registros))
-            with col2: st.metric("Trabajadores Únicos", registros['id_trabajador'].nunique() if 'id_trabajador' in registros.columns else 0)
-            with col3: st.metric("Fecha", fecha_filtro.strftime("%d/%m/%Y") if fecha_filtro else "Todos")
-            with col4: pass
-            if 'fecha_escaneo' in registros.columns:
-                registros_por_dia = registros.groupby('fecha_escaneo').size().reset_index(name='Cantidad')
-                fig = px.bar(registros_por_dia, x='fecha_escaneo', y='Cantidad', title='Escaneos por Día')
-                st.plotly_chart(fig, use_container_width=True)
-            output = io.BytesIO()
-            registros.to_excel(output, index=False)
-            output.seek(0)
-            st.download_button("📥 Exportar a Excel", data=output, file_name=f"registros_qr_{get_mexico_date().strftime('%Y%m%d')}.xlsx")
-        else:
-            st.info("No hay registros de escaneos")
-    except Exception as e:
-        st.error(f"Error al obtener registros: {str(e)}")
-
-def mostrar_reportes():
-    st.header("📊 Reportes")
-    tab1, tab2, tab3 = st.tabs(["📥 Ingresos", "📤 Bajas", "📋 Nómina Activa"])
-    with tab1:
-        st.subheader("Ingresos de la Semana")
-        if st.button("Generar reporte", key="btn_ingresos", use_container_width=True):
-            df, inicio, fin = get_report_ingresos_semana()
-            if df.empty:
-                st.warning(f"No hay ingresos entre {inicio} y {fin}")
-            else:
-                st.success(f"Encontrados: {len(df)}")
-                st.dataframe(df, use_container_width=True)
-                output = export_to_excel(df, "Ingresos")
-                st.download_button("📥 Descargar Excel", data=output, file_name=f"ingresos_{inicio}.xlsx")
-    with tab2:
-        st.subheader("Bajas de la Semana")
-        if st.button("Generar reporte", key="btn_bajas", use_container_width=True):
-            df, inicio, fin = get_report_bajas_semana()
-            if df.empty:
-                st.warning(f"No hay bajas entre {inicio} y {fin}")
-            else:
-                st.success(f"Encontradas: {len(df)}")
-                st.dataframe(df, use_container_width=True)
-                output = export_to_excel(df, "Bajas")
-                st.download_button("📥 Descargar Excel", data=output, file_name=f"bajas_{inicio}.xlsx")
-    with tab3:
-        st.subheader("Nómina Activa")
-        col1, col2 = st.columns(2)
-        with col1:
-            deptos_list = ["Todos"] + get_departamentos_nombres()
-            depto = st.selectbox("Departamento", deptos_list, key="depto_nomina")
-        with col2:
-            subs_list = ["Todos"] + get_subdepartamentos_nombres()
-            sub = st.selectbox("Subdepartamento", subs_list, key="sub_nomina")
-        if st.button("Generar reporte", key="btn_nomina", use_container_width=True):
-            df, resumen = get_report_nomina_activa(depto, sub)
-            if df.empty:
-                st.warning("No hay trabajadores activos")
-            else:
-                st.success(f"Total: {len(df)}")
-                st.subheader("Resumen por Departamento")
-                st.dataframe(resumen, use_container_width=True)
-                st.subheader("Detalle de Trabajadores")
-                st.dataframe(df, use_container_width=True)
-                output = BytesIO()
-                with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                    df.to_excel(writer, index=False, sheet_name="Nómina Activa")
-                    resumen.to_excel(writer, index=False, sheet_name="Resumen")
-                output.seek(0)
-                st.download_button("📥 Descargar Excel", data=output, file_name=f"nomina_activa_{get_mexico_date()}.xlsx")
-
-def mostrar_catalogos():
-    st.header("📋 Gestión de Catálogos")
-    tab1, tab2, tab3 = st.tabs(["🏢 Departamentos", "📂 Subdepartamentos", "💼 Puestos"])
-    for tab, tabla, get_func in [(tab1, "departamentos", get_departamentos), (tab2, "subdepartamentos", get_subdepartamentos), (tab3, "puestos", get_puestos)]:
-        with tab:
-            with st.form(f"new_{tabla}"):
-                nuevo = st.text_input(f"Nuevo {tabla[:-1]}", key=f"nuevo_{tabla}")
-                if st.form_submit_button("➕ Agregar"):
-                    if nuevo:
-                        success, msg = add_catalog_item(tabla, nuevo)
-                        if success:
-                            st.success(msg)
-                            st.rerun()
-                        else:
-                            st.error(msg)
-            st.markdown("---")
-            items = get_func()
-            for id_item, nombre in items:
-                cols = st.columns([4, 1, 1])
-                with cols[0]: st.write(f"**{nombre}**")
-                with cols[1]:
-                    if st.button("✏️ Editar", key=f"edit_{tabla}_{id_item}"):
-                        st.session_state[f'editing_{tabla}_{id_item}'] = True
-                with cols[2]:
-                    if st.button("🗑️ Eliminar", key=f"del_{tabla}_{id_item}"):
-                        st.session_state[f'deleting_{tabla}_{id_item}'] = True
-                if st.session_state.get(f'editing_{tabla}_{id_item}', False):
-                    with st.form(key=f"form_edit_{tabla}_{id_item}"):
-                        nuevo_nombre = st.text_input("Editar nombre", value=nombre, key=f"edit_nombre_{tabla}_{id_item}")
-                        if st.form_submit_button("💾 Guardar"):
-                            success, msg = update_catalog_item(tabla, id_item, nuevo_nombre)
-                            if success:
-                                st.success(msg)
-                                del st.session_state[f'editing_{tabla}_{id_item}']
-                                st.rerun()
-                if st.session_state.get(f'deleting_{tabla}_{id_item}', False):
-                    st.warning(f"¿Eliminar '{nombre}'?")
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        if st.button("✅ Sí", key=f"conf_del_{tabla}_{id_item}"):
-                            success, msg = delete_catalog_item(tabla, id_item)
-                            if success:
-                                st.success(msg)
-                                del st.session_state[f'deleting_{tabla}_{id_item}']
-                                st.rerun()
-                    with col2:
-                        if st.button("❌ No", key=f"cancel_del_{tabla}_{id_item}"):
-                            del st.session_state[f'deleting_{tabla}_{id_item}']
-                st.markdown("---")
-
-def mostrar_proyecciones():
-    st.header("📈 Proyecciones de Cajas por Semana")
-    st.markdown("""
-    <div style="background-color: #e3f2fd; padding: 15px; border-radius: 10px; margin-bottom: 20px;">
-        <strong>📌 Información:</strong><br>
-        • Registre las proyecciones de cajas por semana<br>
-        • El sistema sumará automáticamente la producción real de todos los invernaderos para comparar<br>
-        • Se calculará el déficit/superávit semanal y total
-    </div>
-    """, unsafe_allow_html=True)
-    tab1, tab2, tab3 = st.tabs(["📝 Registrar Proyección", "📊 Comparativa Real vs Proyectado", "📋 Historial"])
-    with tab1:
-        st.subheader("Registrar Nueva Proyección Semanal")
-        semana_actual = get_mexico_week()
-        col_semana_actual = st.columns([1, 2, 1])
-        with col_semana_actual[1]:
-            st.markdown(f'<div class="week-card"><div style="font-size: 12px;">📆 SEMANA ACTUAL</div><div style="font-size: 24px; font-weight: bold;">{semana_actual}</div></div>', unsafe_allow_html=True)
-        col1, col2 = st.columns(2)
-        with col1:
-            semana = st.number_input("Semana *", min_value=1, max_value=52, value=semana_actual, step=1, key="semana_proyeccion")
-        with col2:
-            cajas_proyectadas = st.number_input("Cajas Proyectadas *", min_value=0.0, step=50.0, value=0.0, key="cajas_proyectadas")
-        registrado_por = st.text_input("Registrado por *", placeholder="Nombre de quien registra la proyección", key="registrado_por_proyeccion")
-        observaciones = st.text_area("Observaciones", placeholder="Notas adicionales sobre la proyección...", key="obs_proyeccion")
-        proyeccion_existente = get_proyecciones(semana=semana)
-        if not proyeccion_existente.empty:
-            st.info(f"⚠️ Ya existe una proyección para semana {semana}: {proyeccion_existente.iloc[0]['cajas_proyectadas']:.0f} cajas. Al guardar se actualizará.")
-        if st.button("✅ Registrar Proyección", type="primary", use_container_width=True, key="btn_registrar_proyeccion"):
-            if not registrado_por:
-                st.error("❌ Ingrese quién registra la proyección")
-            elif cajas_proyectadas <= 0:
-                st.error("❌ Ingrese una cantidad válida de cajas proyectadas")
-            else:
-                success, msg = registrar_proyeccion(semana, cajas_proyectadas, registrado_por, observaciones)
-                if success:
-                    st.success(msg)
-                    st.balloons()
-                else:
-                    st.error(msg)
-    with tab2:
-        st.subheader("Comparativa: Producción Real vs Proyectada")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            semana_inicio = st.number_input("Semana inicio", min_value=1, max_value=52, value=1, key="comp_semana_inicio")
-        with col2:
-            semana_fin = st.number_input("Semana fin", min_value=1, max_value=52, value=get_mexico_week(), key="comp_semana_fin")
-        with col3:
-            tipo_opciones = ["Todos", "Nacional", "Exportación"]
-            tipo_seleccionado = st.selectbox("Tipo de Cosecha", tipo_opciones, key="comp_tipo_cosecha")
-            presentacion_opciones = ["Todos", "6 oz", "12 oz"]
-            presentacion_seleccionado = st.selectbox("Presentación", presentacion_opciones, key="comp_presentacion")
-        if st.button("📊 Actualizar Comparativa", key="btn_actualizar_comparativa", use_container_width=True):
-            df_comparativa = get_comparativa_proyeccion_real_con_filtros(semana_inicio, semana_fin, tipo_seleccionado if tipo_seleccionado != "Todos" else None, presentacion_seleccionado if presentacion_seleccionado != "Todos" else None)
-            if not df_comparativa.empty:
-                st.success(f"Datos encontrados para {len(df_comparativa)} semanas")
-                total_proyectado = df_comparativa['cajas_proyectadas'].sum()
-                total_real = df_comparativa['cajas_reales'].sum()
-                diferencia_total = total_real - total_proyectado
-                porcentaje_total = (diferencia_total / total_proyectado * 100) if total_proyectado > 0 else 0
-                col1, col2, col3, col4 = st.columns(4)
-                with col1: st.metric("📊 Total Proyectado", f"{total_proyectado:,.0f} cajas")
-                with col2: st.metric("✅ Total Real", f"{total_real:,.0f} cajas")
-                with col3: st.metric("📈 Diferencia", f"{diferencia_total:+,.0f} cajas")
-                with col4: st.metric("📉 Porcentaje", f"{porcentaje_total:+.1f}%")
-                st.subheader("Detalle por Semana")
-                df_display = df_comparativa.copy()
-                df_display['cajas_proyectadas'] = df_display['cajas_proyectadas'].map(lambda x: f"{x:.0f}")
-                df_display['cajas_reales'] = df_display['cajas_reales'].map(lambda x: f"{x:.0f}")
-                df_display['diferencia'] = df_display['diferencia'].map(lambda x: f"{x:+.0f}")
-                df_display['porcentaje_desviacion'] = df_display['porcentaje_desviacion'].map(lambda x: f"{x:+.1f}%")
-                st.dataframe(df_display[['semana', 'cajas_proyectadas', 'cajas_reales', 'diferencia', 'porcentaje_desviacion', 'estado']], use_container_width=True)
-                st.subheader("📊 Análisis Visual")
-                fig1 = go.Figure()
-                fig1.add_trace(go.Bar(x=df_comparativa['semana'], y=df_comparativa['cajas_proyectadas'], name='Proyectado', marker_color='#3498db'))
-                fig1.add_trace(go.Bar(x=df_comparativa['semana'], y=df_comparativa['cajas_reales'], name='Real', marker_color='#2ecc71'))
-                fig1.update_layout(title='Comparativa Semanal: Proyectado vs Real', xaxis_title='Semana', yaxis_title='Cajas', barmode='group', plot_bgcolor='white', height=500)
-                st.plotly_chart(fig1, use_container_width=True)
-                fig2 = go.Figure()
-                fig2.add_trace(go.Scatter(x=df_comparativa['semana'], y=df_comparativa['porcentaje_desviacion'], mode='lines+markers', name='% Desviación', line=dict(color='#e74c3c', width=3), marker=dict(size=8)))
-                fig2.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
-                fig2.update_layout(title='Evolución del Porcentaje de Desviación por Semana', xaxis_title='Semana', yaxis_title='% Desviación', plot_bgcolor='white', height=400)
-                st.plotly_chart(fig2, use_container_width=True)
-                output = export_to_excel(df_comparativa, "Comparativa_Real_Proyectado")
-                st.download_button("📥 Exportar Comparativa a Excel", data=output, file_name=f"comparativa_proyecciones_{get_mexico_date()}.xlsx")
-            else:
-                st.warning("No hay datos de proyecciones o producción real para el período seleccionado")
-    with tab3:
-        st.subheader("Historial de Proyecciones Registradas")
-        col1, col2 = st.columns(2)
-        with col1:
-            semana_hist = st.number_input("Filtrar por semana (opcional)", min_value=1, max_value=52, value=1, step=1, key="hist_semana")
-        semana_hist_param = semana_hist if semana_hist > 0 else None
-        df_proyecciones = get_proyecciones(semana=semana_hist_param)
-        if not df_proyecciones.empty:
-            df_display = df_proyecciones.copy()
-            df_display['fecha_registro'] = pd.to_datetime(df_display['fecha_registro']).dt.strftime('%d/%m/%Y %H:%M')
-            st.dataframe(df_display[['semana', 'cajas_proyectadas', 'fecha_registro', 'registrado_por', 'observaciones']], use_container_width=True)
-            output = export_to_excel(df_proyecciones, "Proyecciones")
-            st.download_button("📥 Exportar Proyecciones a Excel", data=output, file_name=f"proyecciones_{get_mexico_date()}.xlsx")
-            col1, col2 = st.columns(2)
-            with col1: st.metric("Total Proyectado", f"{df_proyecciones['cajas_proyectadas'].sum():,.0f} cajas")
-            with col2: st.metric("Promedio por Semana", f"{df_proyecciones['cajas_proyectadas'].mean():,.0f} cajas")
-        else:
-            st.info("No hay proyecciones registradas para los filtros seleccionados")
-
-def mostrar_dashboard_general():
-    with st.sidebar:
-        st.markdown('<div style="text-align: center; padding: 20px; background: linear-gradient(135deg, #1e3c2c 0%, #2a6b3c 100%); border-radius: 15px; color: white; margin-bottom: 20px;"><h2 style="margin: 0;">🌱 Dashboard</h2><p style="margin: 5px 0 0 0;">Filtros interactivos</p></div>', unsafe_allow_html=True)
-        st.markdown("### 📅 Rango de Fechas")
-        fecha_default_inicio = get_mexico_date() - timedelta(days=90)
-        fecha_default_fin = get_mexico_date()
-        fecha_inicio = st.date_input("Fecha inicio", fecha_default_inicio, key="dash_fecha_inicio")
-        fecha_fin = st.date_input("Fecha fin", fecha_default_fin, key="dash_fecha_fin")
-        st.markdown("### 🏭 Invernadero")
-        invernaderos = get_invernaderos_usuario()  # Usar solo invernaderos asignados
-        invernaderos_opciones = ["Todos"] + [nombre for _, nombre, _, _ in invernaderos]
-        invernadero_seleccionado = st.selectbox("Seleccionar invernadero", invernaderos_opciones, key="dash_invernadero")
-        st.markdown("### 🌾 Tipo de Cultivo")
-        tipo_opciones = ["Todos", "Nacional", "Exportación"]
-        tipo_seleccionado = st.selectbox("Seleccionar tipo", tipo_opciones, key="dash_tipo")
-        st.markdown("### 📦 Presentación")
-        presentacion_opciones = ["Todos", "6 oz", "12 oz"]
-        presentacion_seleccionado = st.selectbox("Seleccionar presentación", presentacion_opciones, key="dash_presentacion")
-        st.markdown("### 📆 Semana")
-        semana_actual = get_mexico_week()
-        semana_seleccionada = st.number_input("Número de semana", min_value=1, max_value=52, value=semana_actual, key="dash_semana")
-        st.markdown("---")
-        st.caption("📊 Datos actualizados en tiempo real")
-    try:
-        query_cosechas = supabase.table('cosechas').select("*, invernaderos:invernadero_id (nombre), trabajadores:trabajador_id (nombre, apellido_paterno)")
-        if fecha_inicio:
-            query_cosechas = query_cosechas.gte('fecha', fecha_inicio.isoformat())
-        if fecha_fin:
-            query_cosechas = query_cosechas.lte('fecha', fecha_fin.isoformat())
-        cosechas_result = query_cosechas.order('fecha', desc=True).execute()
-        df_cosechas = pd.DataFrame(cosechas_result.data) if cosechas_result.data else pd.DataFrame()
-        if not df_cosechas.empty:
-            if invernadero_seleccionado and invernadero_seleccionado != "Todos":
-                df_cosechas = df_cosechas[df_cosechas['invernaderos'].apply(lambda x: x['nombre'] if x else '') == invernadero_seleccionado]
-            if tipo_seleccionado and tipo_seleccionado != "Todos":
-                df_cosechas = df_cosechas[df_cosechas['tipo_cosecha'] == tipo_seleccionado]
-            if presentacion_seleccionado and presentacion_seleccionado != "Todos":
-                df_cosechas = df_cosechas[df_cosechas['presentacion'] == presentacion_seleccionado]
-            if semana_seleccionada:
-                df_cosechas = df_cosechas[df_cosechas['semana'] == semana_seleccionada]
-        trabajadores_result = supabase.table('trabajadores').select('*').execute()
-        df_trabajadores = pd.DataFrame(trabajadores_result.data) if trabajadores_result.data else pd.DataFrame()
-        query_traslados = supabase.table('traslados_camara_fria').select("*, invernaderos:invernadero_id (nombre)")
-        if fecha_inicio:
-            query_traslados = query_traslados.gte('fecha', fecha_inicio.isoformat())
-        if fecha_fin:
-            query_traslados = query_traslados.lte('fecha', fecha_fin.isoformat())
-        traslados_result = query_traslados.execute()
-        df_traslados = pd.DataFrame(traslados_result.data) if traslados_result.data else pd.DataFrame()
-        if not df_traslados.empty and invernadero_seleccionado and invernadero_seleccionado != "Todos":
-            df_traslados = df_traslados[df_traslados['invernaderos'].apply(lambda x: x['nombre'] if x else '') == invernadero_seleccionado]
-        if semana_seleccionada and not df_traslados.empty:
-            df_traslados = df_traslados[df_traslados['semana'] == semana_seleccionada]
-        query_incidencias = supabase.table('incidencias').select("*, trabajadores:trabajador_id (nombre, apellido_paterno)")
-        if fecha_inicio:
-            query_incidencias = query_incidencias.gte('fecha', fecha_inicio.isoformat())
-        if fecha_fin:
-            query_incidencias = query_incidencias.lte('fecha', fecha_fin.isoformat())
-        incidencias_result = query_incidencias.execute()
-        df_incidencias = pd.DataFrame(incidencias_result.data) if incidencias_result.data else pd.DataFrame()
-        query_pesajes = supabase.table('pesaje_cajas').select('*')
-        if fecha_inicio:
-            query_pesajes = query_pesajes.gte('fecha', fecha_inicio.isoformat())
-        if fecha_fin:
-            query_pesajes = query_pesajes.lte('fecha', fecha_fin.isoformat())
-        pesajes_result = query_pesajes.execute()
-        df_pesajes = pd.DataFrame(pesajes_result.data) if pesajes_result.data else pd.DataFrame()
-        activos = len(df_trabajadores[df_trabajadores['estatus'] == 'activo']) if not df_trabajadores.empty else 0
-        bajas = len(df_trabajadores[df_trabajadores['estatus'] == 'baja']) if not df_trabajadores.empty else 0
-        total_personal = activos + bajas
-        rotacion = (bajas / max(total_personal, 1)) * 100
-        total_cajas = df_cosechas['numero_cajas'].sum() if not df_cosechas.empty else 0
-        total_clams = df_cosechas['cantidad_clams'].sum() if not df_cosechas.empty else 0
-        trabajadores_unicos = df_cosechas['trabajador_id'].nunique() if not df_cosechas.empty else 0
-        promedio_cajas_trabajador = total_cajas / max(trabajadores_unicos, 1)
-        total_trasladadas = df_traslados['cantidad_cajas'].sum() if not df_traslados.empty else 0
-        porcentaje_merma = obtener_porcentaje_merma_filtrado(df_cosechas, df_traslados)
-        resumen_proyecciones = get_resumen_proyecciones_total_con_filtros_dashboard(df_cosechas)
-        total_faltas = len(df_incidencias[df_incidencias['tipo_incidencia'].str.contains('Falta', na=False)]) if not df_incidencias.empty else 0
-        total_permisos = len(df_incidencias[df_incidencias['tipo_incidencia'].str.contains('Permiso', na=False)]) if not df_incidencias.empty else 0
-        total_incidencias = len(df_incidencias) if not df_incidencias.empty else 0
-        total_pesado = df_pesajes['cantidad_cajas_pesadas'].sum() if not df_pesajes.empty else 0
-        total_recibido = df_pesajes['cajas_recibidas'].sum() if not df_pesajes.empty else 0
-        diferencia_pesaje = total_pesado - total_recibido
-    except Exception as e:
-        st.error(f"Error al cargar datos: {str(e)}")
-        df_cosechas = pd.DataFrame()
-        df_trabajadores = pd.DataFrame()
-        df_traslados = pd.DataFrame()
-        df_incidencias = pd.DataFrame()
-        df_pesajes = pd.DataFrame()
-        activos = bajas = total_personal = rotacion = total_cajas = total_clams = promedio_cajas_trabajador = total_trasladadas = porcentaje_merma = total_faltas = total_permisos = total_incidencias = total_pesado = total_recibido = diferencia_pesaje = 0
-        resumen_proyecciones = {'total_proyectado': 0, 'total_real': 0, 'diferencia': 0, 'porcentaje_desviacion': 0}
-    st.markdown('<div class="section-title">📊 KPIs Estratégicos</div>', unsafe_allow_html=True)
-    col1, col2, col3, col4, col5, col6 = st.columns(6)
-    with col1: st.markdown(f'<div class="kpi-card"><div>👥</div><div class="kpi-value">{activos}</div><div class="kpi-label">Personal Activo</div></div>', unsafe_allow_html=True)
-    with col2: st.markdown(f'<div class="kpi-card"><div>📉</div><div class="kpi-value">{bajas}</div><div class="kpi-label">Bajas</div><div class="kpi-label">Rotación: {rotacion:.1f}%</div></div>', unsafe_allow_html=True)
-    with col3: st.markdown(f'<div class="kpi-card"><div>📦</div><div class="kpi-value">{total_cajas:,.0f}</div><div class="kpi-label">Cajas Cosechadas</div><div class="kpi-label">🥫 {total_clams:,.0f} clams</div></div>', unsafe_allow_html=True)
-    with col4: st.markdown(f'<div class="kpi-card"><div>❄️</div><div class="kpi-value">{total_trasladadas:,.0f}</div><div class="kpi-label">Trasladadas a Cámara Fría</div><div class="kpi-label">{(total_trasladadas/max(total_cajas,1)*100):.1f}% del total</div></div>', unsafe_allow_html=True)
-    with col5:
-        if porcentaje_merma > 0:
-            st.markdown(f'<div style="background: linear-gradient(135deg, #ff6b6b 0%, #c44545 100%); border-radius: 15px; padding: 20px; color: white; text-align: center;"><div style="font-size: 14px;">📉 PORCENTAJE DE MERMA</div><div style="font-size: 48px; font-weight: bold;">{porcentaje_merma:.2f}%</div><div style="font-size: 12px;">(Kilos enviados / Peso de caja) / Cosecha total</div></div>', unsafe_allow_html=True)
-        else:
-            st.markdown(f'<div style="background: linear-gradient(135deg, #95a5a6 0%, #7f8c8d 100%); border-radius: 15px; padding: 20px; color: white; text-align: center;"><div style="font-size: 14px;">📉 PORCENTAJE DE MERMA</div><div style="font-size: 48px; font-weight: bold;">0.00%</div><div style="font-size: 12px;">Sin datos en el rango seleccionado</div></div>', unsafe_allow_html=True)
-    with col6:
-        porcentaje_deficit = resumen_proyecciones['porcentaje_desviacion']
-        color_gradient = "linear-gradient(135deg, #2ecc71 0%, #27ae60 100%)" if porcentaje_deficit >= 0 else "linear-gradient(135deg, #e74c3c 0%, #c0392b 100%)"
-        icono = "📈" if porcentaje_deficit >= 0 else "📉"
-        texto_estado = "SUPERÁVIT" if porcentaje_deficit >= 0 else "DÉFICIT"
-        st.markdown(f'<div style="background: {color_gradient}; border-radius: 15px; padding: 20px; color: white; text-align: center;"><div style="font-size: 14px;">{icono} PROYECCIÓN VS REAL</div><div style="font-size: 48px; font-weight: bold;">{abs(porcentaje_deficit):.2f}%</div><div style="font-size: 12px;">{texto_estado} - Proyectado: {resumen_proyecciones["total_proyectado"]:,.0f} cajas | Real: {resumen_proyecciones["total_real"]:,.0f} cajas</div></div>', unsafe_allow_html=True)
-    col7, col8, col9, col10, col11 = st.columns(5)
-    with col7: st.markdown(f'<div class="kpi-card"><div>👨‍🌾</div><div class="kpi-value">{promedio_cajas_trabajador:.1f}</div><div class="kpi-label">Promedio x Trabajador</div></div>', unsafe_allow_html=True)
-    with col8: st.markdown(f'<div class="kpi-card"><div>⚖️</div><div class="kpi-value">{total_pesado:,.0f}</div><div class="kpi-label">Cajas Pesadas</div><div class="kpi-label">Recibidas: {total_recibido:,.0f}</div></div>', unsafe_allow_html=True)
-    with col9: st.markdown(f'<div class="kpi-card"><div>📊</div><div class="kpi-value">{diferencia_pesaje:+,.0f}</div><div class="kpi-label">Diferencia Pesaje</div></div>', unsafe_allow_html=True)
-    with col10: st.markdown(f'<div class="kpi-card"><div>⚠️</div><div class="kpi-value">{total_faltas + total_permisos}</div><div class="kpi-label">Faltas y Permisos</div><div class="kpi-label">🚫 Faltas: {total_faltas} | 📝 Permisos: {total_permisos}</div></div>', unsafe_allow_html=True)
-    with col11: st.markdown(f'<div class="kpi-card"><div>📋</div><div class="kpi-value">{total_incidencias}</div><div class="kpi-label">Total Incidencias</div></div>', unsafe_allow_html=True)
-    st.markdown('<div class="section-title">🌾 Avance de Cosecha del Día</div>', unsafe_allow_html=True)
-    df_avance = get_avance_hoy_por_invernadero()
-    if not df_avance.empty:
-        df_avance_filtrado = df_avance
-        if invernadero_seleccionado and invernadero_seleccionado != "Todos":
-            df_avance_filtrado = df_avance[df_avance['invernadero_nombre'] == invernadero_seleccionado]
-        st.dataframe(df_avance_filtrado[['invernadero_nombre', 'lineas_cosechadas', 'lineas_totales', 'porcentaje', 'supervisor', 'hora', 'turno']], use_container_width=True)
-        if not df_avance_filtrado.empty:
-            promedio_avance = df_avance_filtrado['porcentaje'].mean()
-            col1, col2 = st.columns(2)
-            with col1: st.markdown(f'<div class="progress-card"><div>📊 Promedio General</div><div class="progress-value">{promedio_avance:.1f}%</div><div>de avance en todos los invernaderos</div></div>', unsafe_allow_html=True)
-            with col2:
-                total_lineas_cosechadas = df_avance_filtrado['lineas_cosechadas'].sum()
-                total_lineas_totales = df_avance_filtrado['lineas_totales'].sum()
-                porcentaje_total = (total_lineas_cosechadas / total_lineas_totales) * 100 if total_lineas_totales > 0 else 0
-                st.markdown(f'<div style="background-color: #f8f9fa; padding: 15px; border-radius: 10px; text-align: center;"><div>📈 Progreso Total del Día</div><div style="font-size: 24px; font-weight: bold;">{total_lineas_cosechadas:,.0f} / {total_lineas_totales:,.0f} líneas</div><div style="font-size: 18px; font-weight: bold; color: #2a6b3c;">{porcentaje_total:.1f}%</div></div>', unsafe_allow_html=True)
-            fig = px.bar(df_avance_filtrado, x='invernadero_nombre', y='porcentaje', title='Porcentaje de Avance por Invernadero (Hoy)', labels={'invernadero_nombre': 'Invernadero', 'porcentaje': 'Porcentaje (%)'}, text='porcentaje', color='porcentaje', color_continuous_scale='Greens')
-            fig.update_traces(texttemplate='%{text:.1f}%', textposition='outside')
-            fig.update_layout(plot_bgcolor='white', height=400)
-            st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("No hay registros de avance para el día de hoy")
-    st.markdown('<div class="section-title">🌾 Producción Agrícola</div>', unsafe_allow_html=True)
-    col1, col2 = st.columns(2)
-    with col1:
-        if not df_cosechas.empty:
-            df_semanal = df_cosechas.groupby('semana')['numero_cajas'].sum().reset_index().sort_values('semana')
-            fig = px.line(df_semanal, x='semana', y='numero_cajas', title='Cajas Cosechadas por Semana', labels={'semana': 'Semana', 'numero_cajas': 'Cajas'})
-            fig.update_traces(line=dict(color='#2a6b3c', width=3))
-            fig.update_layout(plot_bgcolor='white', height=400)
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("No hay datos de cosechas para mostrar")
-    with col2:
-        if not df_cosechas.empty and 'invernaderos' in df_cosechas.columns:
-            df_cosechas['invernadero_nombre'] = df_cosechas['invernaderos'].apply(lambda x: x['nombre'] if x else 'Desconocido')
-            df_inv = df_cosechas.groupby('invernadero_nombre')['numero_cajas'].sum().reset_index().sort_values('numero_cajas', ascending=True)
-            fig = px.bar(df_inv, x='numero_cajas', y='invernadero_nombre', orientation='h', title='Cajas por Invernadero', labels={'numero_cajas': 'Cajas', 'invernadero_nombre': 'Invernadero'}, color='numero_cajas', color_continuous_scale='Greens')
-            fig.update_layout(plot_bgcolor='white', height=400)
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("No hay datos de invernaderos para mostrar")
-    st.markdown('<div class="section-title">📈 Análisis de Producción</div>', unsafe_allow_html=True)
-    col1, col2 = st.columns(2)
-    with col1:
-        if not df_cosechas.empty or not df_traslados.empty:
-            fig = go.Figure()
-            if not df_cosechas.empty:
-                df_cosech_semanal = df_cosechas.groupby('semana')['numero_cajas'].sum().reset_index().sort_values('semana')
-                fig.add_trace(go.Scatter(x=df_cosech_semanal['semana'], y=df_cosech_semanal['numero_cajas'], mode='lines+markers', name='Producción', line=dict(color='#2a6b3c', width=3), marker=dict(size=8)))
-            if not df_traslados.empty:
-                df_trans_semanal = df_traslados.groupby('semana')['cantidad_cajas'].sum().reset_index().sort_values('semana')
-                fig.add_trace(go.Scatter(x=df_trans_semanal['semana'], y=df_trans_semanal['cantidad_cajas'], mode='lines+markers', name='Traslados', line=dict(color='#e67e22', width=3), marker=dict(size=8)))
-            fig.update_layout(title='Producción vs Traslados por Semana', xaxis_title='Semana', yaxis_title='Cajas', plot_bgcolor='white', height=400)
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("No hay datos de producción o traslados para mostrar")
-    with col2:
-        if not df_cosechas.empty:
-            df_prod = df_cosechas.groupby(['tipo_cosecha', 'presentacion'])['numero_cajas'].sum().reset_index()
-            fig = px.bar(df_prod, x='tipo_cosecha', y='numero_cajas', color='presentacion', title='Producción por Tipo y Presentación', labels={'numero_cajas': 'Cajas', 'tipo_cosecha': 'Tipo'}, barmode='group', color_discrete_sequence=['#2a6b3c', '#55b36a'])
-            fig.update_layout(plot_bgcolor='white', height=400)
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("No hay datos de producción para mostrar")
-    st.markdown('<div class="section-title">📊 Comparativa Diaria: Cosechado vs Trasladado vs Pesado</div>', unsafe_allow_html=True)
-    if not df_cosechas.empty or not df_traslados.empty or not df_pesajes.empty:
-        fig = go.Figure()
-        if not df_cosechas.empty:
-            df_c_diario = df_cosechas.groupby('fecha')['numero_cajas'].sum().reset_index().sort_values('fecha')
-            fig.add_trace(go.Scatter(x=df_c_diario['fecha'], y=df_c_diario['numero_cajas'], mode='lines+markers', name='Cosechado', line=dict(color='#2ecc71', width=3)))
-        if not df_traslados.empty:
-            df_t_diario = df_traslados.groupby('fecha')['cantidad_cajas'].sum().reset_index().sort_values('fecha')
-            fig.add_trace(go.Scatter(x=df_t_diario['fecha'], y=df_t_diario['cantidad_cajas'], mode='lines+markers', name='Trasladado', line=dict(color='#3498db', width=3)))
-        if not df_pesajes.empty:
-            df_p_diario = df_pesajes.groupby('fecha')['cantidad_cajas_pesadas'].sum().reset_index().sort_values('fecha')
-            fig.add_trace(go.Scatter(x=df_p_diario['fecha'], y=df_p_diario['cantidad_cajas_pesadas'], mode='lines+markers', name='Pesado', line=dict(color='#e74c3c', width=3)))
-        fig.update_layout(title='Evolución Diaria de Producción', xaxis_title='Fecha', yaxis_title='Cajas', plot_bgcolor='white', height=400)
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("No hay datos para mostrar en la comparativa diaria")
-    with st.expander("📋 Ver detalle de datos", expanded=False):
-        st.markdown("### 📦 Últimas cosechas")
-        if not df_cosechas.empty:
-            st.dataframe(df_cosechas[['fecha', 'semana', 'tipo_cosecha', 'presentacion', 'numero_cajas', 'cajas_enviadas', 'merma_kilos', 'porcentaje_merma']].head(10), use_container_width=True)
-        st.markdown("### ❄️ Últimos traslados")
-        if not df_traslados.empty:
-            st.dataframe(df_traslados.head(10), use_container_width=True)
-        st.markdown("### ⚖️ Últimos pesajes")
-        if not df_pesajes.empty:
-            st.dataframe(df_pesajes.head(10), use_container_width=True)
-        st.markdown("### ⚠️ Incidencias recientes")
-        if not df_incidencias.empty:
-            st.dataframe(df_incidencias.head(10), use_container_width=True)
-
-def mostrar_cierre_dia():
-    st.header("📅 Cierre de Día y Auditoría")
-    tab1, tab2 = st.tabs(["🔒 Realizar Cierre", "📋 Historial de Cierres"])
-    with tab1:
-        st.subheader("Realizar Cierre del Día")
-        fecha_cierre = st.date_input("Fecha a cerrar", get_mexico_date())
-        cierres = get_cierres_dia()
-        if not cierres.empty and fecha_cierre.isoformat() in cierres['fecha'].values:
-            st.warning("⚠️ Esta fecha ya fue cerrada anteriormente")
-        else:
-            if st.button("📊 Generar Reporte de Auditoría", type="primary"):
-                with st.spinner("Generando reporte..."):
-                    reporte = generar_reporte_auditoria_dia(fecha_cierre)
-                    if reporte:
-                        st.success("Reporte generado exitosamente")
-                        st.subheader("📊 Resumen del Día")
-                        col1, col2, col3, col4, col5, col6 = st.columns(6)
-                        with col1: st.metric("Cajas Cosechadas", f"{reporte['resumen']['total_cajas_cosechadas']:.0f}")
-                        with col2: st.metric("Cajas Trasladadas", f"{reporte['resumen']['total_cajas_trasladadas']:.0f}")
-                        with col3: st.metric("Cajas Pesadas", f"{reporte['resumen']['total_cajas_pesadas']:.0f}")
-                        with col4: st.metric("Cajas Recibidas", f"{reporte['resumen']['total_cajas_recibidas']:.0f}")
-                        with col5: st.metric("Diferencia Pesaje", f"{reporte['resumen']['diferencia_pesaje']:+.0f}")
-                        with col6: st.metric("Merma (kg)", f"{reporte['resumen']['total_merma_kilos']:.2f}")
-                        col1, col2, col3, col4 = st.columns(4)
-                        with col1: st.metric("Personal", reporte['resumen']['total_personal_asistencia'])
-                        with col2: st.metric("Avance Promedio", f"{reporte['resumen']['promedio_avance']:.1f}%")
-                        with col3: st.metric("Incidencias", reporte['resumen']['total_incidencias'])
-                        with col4: st.metric("Solicitudes Apoyo", reporte['resumen']['total_solicitudes_apoyo'])
-                        with st.expander("📋 Ver detalle del reporte"):
-                            if reporte['detalle_cosechas']:
-                                st.markdown("**Cosechas del día:**")
-                                st.json(reporte['detalle_cosechas'][:5])
-                            if reporte['detalle_traslados']:
-                                st.markdown("**Traslados del día:**")
-                                st.json(reporte['detalle_traslados'][:5])
-                            if reporte['detalle_pesajes']:
-                                st.markdown("**Pesajes del día:**")
-                                st.json(reporte['detalle_pesajes'][:5])
-                            if reporte['detalle_merma']:
-                                st.markdown("**Merma del día:**")
-                                st.json(reporte['detalle_merma'][:5])
-                        pdf_buffer = descargar_reporte_auditoria_pdf(reporte, fecha_cierre)
-                        if pdf_buffer:
-                            st.download_button("📥 Descargar Reporte PDF", data=pdf_buffer, file_name=f"auditoria_{fecha_cierre}.pdf", mime="application/pdf")
-                        if st.button("✅ Confirmar Cierre del Día", type="primary"):
-                            success, msg = registrar_cierre_dia(fecha_cierre, st.session_state.get('user_nombre', 'Sistema'))
-                            if success:
-                                st.success(msg)
-                                st.balloons()
-                                st.rerun()
-                            else:
-                                st.error(msg)
-                    else:
-                        st.error("Error al generar el reporte")
-    with tab2:
-        st.subheader("Historial de Cierres")
-        cierres = get_cierres_dia()
-        if not cierres.empty:
-            st.dataframe(cierres, use_container_width=True)
-            for _, cierre in cierres.iterrows():
-                with st.expander(f"Cierre del {cierre['fecha']} - Realizado por: {cierre['cerrado_por']}"):
-                    try:
-                        result = supabase.table('cierres_dia').select('reporte').eq('fecha', cierre['fecha']).execute()
-                        if result.data and result.data[0].get('reporte'):
-                            datos = result.data[0]['reporte']
-                            st.json(datos)
-                            if st.button(f"📥 Descargar PDF {cierre['fecha']}", key=f"pdf_{cierre['fecha']}"):
-                                pdf_buffer = descargar_reporte_auditoria_pdf(datos, datetime.strptime(cierre['fecha'], '%Y-%m-%d').date())
-                                if pdf_buffer:
-                                    st.download_button("📥 Descargar PDF", data=pdf_buffer, file_name=f"auditoria_{cierre['fecha']}.pdf", mime="application/pdf")
-                    except:
-                        st.info("No se pudo cargar el detalle del reporte")
-        else:
-            st.info("No hay cierres registrados")
-
-def mostrar_cajas_mesa():
-    st.header("📦 Cajas en Mesa")
-    tab1, tab2 = st.tabs(["📝 Registrar Cajas", "🆘 Solicitudes de Apoyo"])
-    with tab1:
-        st.subheader("Registrar Cajas en Mesa")
-        fecha_actual = get_mexico_date()
-        st.markdown(f'<div style="display: flex; gap: 10px; margin-bottom: 20px;"><div class="date-card"><div>📅 FECHA</div><div style="font-size:20px;">{fecha_actual.strftime("%d/%m/%Y")}</div></div><div class="time-card"><div>⏰ HORA</div><div style="font-size:20px;">{get_mexico_time().strftime("%H:%M")}</div></div></div>', unsafe_allow_html=True)
-        invernaderos = get_invernaderos_usuario()  # Usar solo invernaderos asignados
-        if invernaderos:
-            invernadero = st.selectbox("Invernadero", invernaderos, format_func=lambda x: f"{x[1]} - {x[2]}")
-            invernadero_id = invernadero[0]
-        else:
-            invernadero_id = None
-            st.error("No tienes invernaderos asignados para hoy")
-        trabajadores = get_all_workers()
-        if not trabajadores.empty:
-            trabajador = st.selectbox("Trabajador", trabajadores.apply(lambda x: f"{x['id']} - {x['nombre']} {x['apellido_paterno']}", axis=1))
-            trabajador_id = int(trabajador.split(' - ')[0]) if trabajador else None
-        else:
-            trabajador_id = None
-        col1, col2 = st.columns(2)
-        with col1:
-            presentacion = st.selectbox("Presentación", ["6 oz", "12 oz"])
-            cantidad_cajas = st.number_input("Cantidad de cajas", min_value=0.0, step=1.0)
-        with col2:
-            solicitando_apoyo = st.checkbox("Solicitar apoyo")
-            observaciones = st.text_area("Observaciones")
-        if st.button("✅ Registrar", type="primary"):
-            if invernadero_id and trabajador_id and cantidad_cajas > 0:
-                success, msg = registrar_cajas_mesa(invernadero_id, trabajador_id, cantidad_cajas, presentacion, solicitando_apoyo, observaciones)
-                if success:
-                    st.success(msg)
-                    st.balloons()
-                    st.rerun()
-                else:
-                    st.error(msg)
-            else:
-                st.error("Complete todos los campos")
-    with tab2:
-        st.subheader("🆘 Solicitudes de Apoyo Pendientes")
-        cajas_pendientes = get_cajas_mesa(solo_pendientes=True)
-        if not cajas_pendientes.empty:
-            solicitudes = cajas_pendientes[cajas_pendientes['solicita_apoyo'] == True]
-            if not solicitudes.empty:
-                for _, row in solicitudes.iterrows():
-                    with st.expander(f"{row['invernadero']} - {row['cantidad_cajas']} cajas de {row['presentacion']}"):
-                        st.write(f"**Trabajador:** {row['trabajador']}")
-                        st.write(f"**Hora:** {row['hora']}")
-                        st.write(f"**Observaciones:** {row['observaciones']}")
-                        if st.button("✅ Marcar como Atendido", key=f"atender_{row['id']}"):
-                            success, msg = marcar_atendido_caja_mesa(row['id'], st.session_state.get('user_nombre', 'Sistema'))
-                            if success:
-                                st.success(msg)
-                                st.rerun()
-                            else:
-                                st.error(msg)
-            else:
-                st.info("No hay solicitudes de apoyo pendientes")
-            st.markdown("---")
-            st.subheader("Registros del día")
-            st.dataframe(cajas_pendientes, use_container_width=True)
-        else:
-            st.info("No hay registros de cajas en mesa hoy")
-
-def mostrar_menu_sidebar():
-    st.sidebar.markdown('<div class="sidebar-title"><h2>🌾 Sistema Integral</h2><p>Gestión Agrícola</p></div>', unsafe_allow_html=True)
-    
-    if st.session_state.get('authenticated', False):
-        st.sidebar.markdown(f'<div class="user-info">👤 <strong>{st.session_state.get("user_nombre", "Usuario")}</strong><br>📧 {st.session_state.get("user_email", "")}<br>🎭 Rol: <strong>{st.session_state.get("user_rol", "supervisor").upper()}</strong></div>', unsafe_allow_html=True)
-    
-    # Obtener módulos visibles según permisos
-    modulos_visibles = get_modulos_visibles(st.session_state.get('user_id'))
-    
-    # Mostrar solo los módulos permitidos
-    for module_key, module_name in modulos_visibles.items():
-        if st.sidebar.button(module_name, use_container_width=True, key=f"menu_{module_key}"):
-            st.session_state.menu = module_name
-            st.rerun()
-    
-    st.sidebar.markdown("---")
-    
-    if st.sidebar.button("🚪 Cerrar Sesión", use_container_width=True):
-        logout_user()
 
 # ==========================================
 # FUNCIÓN PRINCIPAL
 # ==========================================
 
 def main():
-    global supabase
-    supabase = init_supabase()
-    if supabase is None:
-        st.error("❌ No se pudo conectar a Supabase. Verifica tu configuración.")
-        st.stop()
     if 'menu' not in st.session_state:
-        st.session_state.menu = "📊 Dashboard"
-    if 'authenticated' not in st.session_state:
-        st.session_state.authenticated = False
-    if not st.session_state.authenticated:
-        show_login_page()
-        return
+        st.session_state.menu = "📱 Registro Rápido"
     
     mostrar_menu_sidebar()
     
-    # Mapeo de menús a funciones
-    menu_functions = {
-        "🌾 Registro Cosecha": lambda: (st.header("🌾 Registro de Cosecha"),
-            st.tabs(["📷 Escanear QR", "📝 Registrar Manual"])),
-        "📊 Dashboard": mostrar_dashboard_general,
-        "📈 Proyecciones": mostrar_proyecciones,
-        "🕐 Control Asistencia": mostrar_control_asistencia,
-        "📊 Avance Cosecha": mostrar_avance_cosecha,
-        "❄️ Traslado a Cámara Fría": mostrar_traslados_camara_fria,
-        "🗑️ Gestión Merma": mostrar_gestion_merma,
-        "📦 Cajas en Mesa": mostrar_cajas_mesa,
-        "📱 Generar QR": mostrar_generar_qr if st.session_state.get('user_rol') == 'admin' else lambda: st.error("❌ No tienes permisos"),
-        "📊 Registros QR": mostrar_reportes_qr,
-        "📋 Reportes": mostrar_reportes,
-        "📚 Catálogos": mostrar_catalogos if st.session_state.get('user_rol') == 'admin' else lambda: st.error("❌ No tienes permisos"),
-        "🏭 Gestión Invernaderos": mostrar_gestion_invernaderos,
-        "👥 Gestión Personal": mostrar_gestion_personal if st.session_state.get('user_rol') == 'admin' else lambda: st.error("❌ No tienes permisos"),
-        "👥 Gestión Usuarios": mostrar_gestion_usuarios if st.session_state.get('user_rol') == 'admin' else lambda: st.error("❌ No tienes permisos"),
-        "🔒 Cierre de Día": mostrar_cierre_dia,
-    }
+    if st.session_state.menu == "📱 Registro Rápido":
+        mostrar_registro_rapido()
     
-    # Ejecutar la función correspondiente
-    if st.session_state.menu in menu_functions:
-        if st.session_state.menu == "🌾 Registro Cosecha":
-            st.header("🌾 Registro de Cosecha")
-            tab1, tab2 = st.tabs(["📷 Escanear QR", "📝 Registrar Manual"])
-            with tab1:
-                escanear_qr_con_camara(tipo_evento="cosecha", mostrar_invernadero=True)
-            with tab2:
-                if not get_configuracion_sistema('registro_manual_cosecha'):
-                    st.warning("⚠️ El registro manual de cosecha está deshabilitado por el administrador")
+    elif st.session_state.menu == "🌾 Registro Cosecha":
+        formulario_cosecha()
+        with st.expander("📋 Ver Cosechas Registradas"):
+            cosechas = get_cosechas()
+            if not cosechas.empty:
+                st.dataframe(cosechas, use_container_width=True)
+                output = export_to_excel(cosechas, "Cosechas")
+                st.download_button("📥 Exportar a Excel", data=output,
+                                 file_name=f"cosechas_{datetime.now().date()}.xlsx",
+                                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            else:
+                st.info("No hay cosechas registradas")
+    
+    elif st.session_state.menu == "👥 Gestión Personal":
+        st.header("👥 Gestión de Trabajadores")
+        
+        tab1, tab2 = st.tabs(["Alta de Trabajador", "Buscar/Editar/Baja"])
+        
+        with tab1:
+            with st.form("form_alta", clear_on_submit=True):
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    apellido_paterno = st.text_input("Apellido Paterno *")
+                    nombre = st.text_input("Nombre *")
+                    telefono = st.text_input("Teléfono (10 dígitos)")
+                    
+                with col2:
+                    apellido_materno = st.text_input("Apellido Materno")
+                    correo = st.text_input("Correo Electrónico")
+                    fecha_alta = st.date_input("Fecha de Alta *", datetime.now())
+                    
+                with col3:
+                    st.write("")
+                    st.write("")
+                    st.info("* Campos obligatorios")
+                
+                st.markdown("---")
+                
+                col4, col5, col6 = st.columns(3)
+                with col4:
+                    departamentos_list = get_departamentos_nombres()
+                    departamento = st.selectbox("Departamento *", departamentos_list if departamentos_list else ["Sin datos"])
+                with col5:
+                    subdepartamentos_list = get_subdepartamentos_nombres()
+                    subdepartamento = st.selectbox("Subdepartamento *", subdepartamentos_list if subdepartamentos_list else ["Sin datos"])
+                with col6:
+                    tipo_nomina = st.selectbox("Tipo de Nómina *", ["especial", "imss"])
+                
+                puestos_list = get_puestos_nombres()
+                puesto = st.selectbox("Puesto *", puestos_list if puestos_list else ["Sin datos"])
+                
+                if st.form_submit_button("💾 Guardar Trabajador", use_container_width=True):
+                    if not apellido_paterno or not nombre:
+                        st.error("Complete campos obligatorios")
+                    elif telefono and not validar_telefono(telefono):
+                        st.error("Teléfono debe tener 10 dígitos")
+                    elif correo and not validar_email(correo):
+                        st.error("Email inválido")
+                    elif departamento == "Sin datos" or subdepartamento == "Sin datos" or puesto == "Sin datos":
+                        st.error("Primero debe agregar departamentos, subdepartamentos y puestos en Catálogos")
+                    else:
+                        data = {
+                            "ap": apellido_paterno.strip().upper(),
+                            "am": apellido_materno.strip().upper() if apellido_materno else None,
+                            "nom": nombre.strip().upper(),
+                            "cor": correo.strip() if correo else None,
+                            "tel": telefono.strip() if telefono else None,
+                            "fa": fecha_alta,
+                            "departamento": departamento,
+                            "subdepartamento": subdepartamento,
+                            "tn": tipo_nomina,
+                            "puesto": puesto
+                        }
+                        
+                        success, msg = add_worker(data)
+                        if success:
+                            st.success(msg)
+                            st.balloons()
+                        else:
+                            st.error(msg)
+        
+        with tab2:
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                search_term = st.text_input("Buscar:", placeholder="Nombre o apellido...")
+            with col2:
+                estatus_filter = st.selectbox("Estatus", ["todos", "activo", "baja"])
+            
+            if st.button("🔍 Buscar", use_container_width=True):
+                if search_term:
+                    results = search_workers(search_term, estatus_filter)
+                    
+                    if not results.empty:
+                        st.success(f"Encontrados: {len(results)}")
+                        
+                        for idx, row in results.iterrows():
+                            with st.expander(f"📋 {row['apellido_paterno']} {row['apellido_materno'] or ''}, {row['nombre']}"):
+                                col1, col2, col3 = st.columns(3)
+                                
+                                with col1:
+                                    st.write(f"**ID:** {row['id']}")
+                                    st.write(f"**Email:** {row['correo'] or 'N/A'}")
+                                    st.write(f"**Tel:** {row['telefono'] or 'N/A'}")
+                                
+                                with col2:
+                                    st.write(f"**Depto:** {row['departamento']}")
+                                    st.write(f"**Puesto:** {row['puesto']}")
+                                    st.write(f"**Estatus:** {row['estatus']}")
+                                
+                                with col3:
+                                    if row['estatus'] == 'activo':
+                                        if st.button("🚫 Dar Baja", key=f"baja_{row['id']}_{idx}"):
+                                            st.session_state['baja_id'] = row['id']
+                                            st.session_state['baja_nombre'] = row['nombre']
+                                    else:
+                                        if st.button("🔄 Reactivar", key=f"reactivar_{row['id']}_{idx}"):
+                                            success, msg = reactivar_trabajador(row['id'])
+                                            if success:
+                                                st.success(msg)
+                                                st.rerun()
+                                    
+                                    if st.button("✏️ Editar", key=f"edit_{row['id']}_{idx}"):
+                                        st.session_state['editing_id'] = row['id']
+                                
+                                if 'baja_id' in st.session_state and st.session_state['baja_id'] == row['id']:
+                                    st.warning(f"¿Dar de baja a {st.session_state['baja_nombre']}?")
+                                    fecha = st.date_input("Fecha de baja", datetime.now(), key=f"fecha_{row['id']}_{idx}")
+                                    col_yes, col_no = st.columns(2)
+                                    with col_yes:
+                                        if st.button("✅ Confirmar", key=f"conf_{row['id']}_{idx}"):
+                                            success, msg = dar_baja(row['id'], fecha)
+                                            if success:
+                                                st.success(msg)
+                                                del st.session_state['baja_id']
+                                                del st.session_state['baja_nombre']
+                                                st.rerun()
+                                            else:
+                                                st.error(msg)
+                                    with col_no:
+                                        if st.button("❌ Cancelar", key=f"can_{row['id']}_{idx}"):
+                                            del st.session_state['baja_id']
+                                            del st.session_state['baja_nombre']
+                                            st.rerun()
+                                
+                                if 'editing_id' in st.session_state and st.session_state['editing_id'] == row['id']:
+                                    worker = get_worker_by_id(row['id'])
+                                    if worker:
+                                        with st.form(f"form_edit_{row['id']}_{idx}"):
+                                            st.subheader(f"Editando: {worker['nombre']} {worker['apellido_paterno']}")
+                                            
+                                            col_a, col_b = st.columns(2)
+                                            
+                                            with col_a:
+                                                ap = st.text_input("Apellido Paterno", worker['apellido_paterno'])
+                                                nom = st.text_input("Nombre", worker['nombre'])
+                                                tel = st.text_input("Teléfono", worker['telefono'] or "")
+                                            
+                                            with col_b:
+                                                am = st.text_input("Apellido Materno", worker['apellido_materno'] or "")
+                                                email = st.text_input("Email", worker['correo'] or "")
+                                            
+                                            deptos = get_departamentos_nombres()
+                                            depto = st.selectbox("Departamento", deptos,
+                                                                index=deptos.index(worker['departamento_nombre']) if worker['departamento_nombre'] in deptos else 0)
+                                            
+                                            subs = get_subdepartamentos_nombres()
+                                            sub = st.selectbox("Subdepartamento", subs,
+                                                              index=subs.index(worker['subdepartamento_nombre']) if worker['subdepartamento_nombre'] in subs else 0)
+                                            
+                                            tipo = st.selectbox("Tipo Nómina", ["especial", "imss"],
+                                                               index=0 if worker['tipo_nomina']=='especial' else 1)
+                                            
+                                            puestos = get_puestos_nombres()
+                                            p = st.selectbox("Puesto", puestos,
+                                                            index=puestos.index(worker['puesto_nombre']) if worker['puesto_nombre'] in puestos else 0)
+                                            
+                                            est = st.selectbox("Estatus", ["activo", "baja"], 
+                                                              index=0 if worker['estatus']=='activo' else 1)
+                                            
+                                            col_buttons = st.columns(2)
+                                            with col_buttons[0]:
+                                                if st.form_submit_button("💾 Guardar Cambios"):
+                                                    data = {
+                                                        'apellido_paterno': ap, 
+                                                        'apellido_materno': am,
+                                                        'nombre': nom, 
+                                                        'correo': email, 
+                                                        'telefono': tel,
+                                                        'departamento': depto, 
+                                                        'subdepartamento': sub,
+                                                        'tipo_nomina': tipo, 
+                                                        'puesto': p, 
+                                                        'estatus': est
+                                                    }
+                                                    success, msg = update_worker(row['id'], data)
+                                                    if success:
+                                                        st.success(msg)
+                                                        del st.session_state['editing_id']
+                                                        st.rerun()
+                                                    else:
+                                                        st.error(msg)
+                                            with col_buttons[1]:
+                                                if st.form_submit_button("❌ Cancelar"):
+                                                    del st.session_state['editing_id']
+                                                    st.rerun()
+                    else:
+                        st.info("No se encontraron resultados")
                 else:
-                    formulario_cosecha_manual()
-            with st.expander("📋 Ver Cosechas Registradas"):
-                cosechas = get_cosechas()
-                if not cosechas.empty:
-                    st.dataframe(cosechas, use_container_width=True)
-                    output = export_to_excel(cosechas, "Cosechas")
-                    st.download_button("📥 Exportar a Excel", data=output, file_name=f"cosechas_{get_mexico_date()}.xlsx")
+                    st.warning("Ingresa un término de búsqueda")
+    
+    elif st.session_state.menu == "📊 Dashboard":
+        st.header("📈 Dashboard General")
+        
+        st.subheader("👥 Estadísticas de Trabajadores")
+        try:
+            stats = get_dashboard_stats()
+            
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Total Activos", stats['total_activos'])
+            with col2:
+                st.metric("Total Bajas", stats['total_bajas'])
+            with col3:
+                st.metric("Ingresos del Mes", stats['ingresos_mes'])
+            with col4:
+                tasa = round((stats['total_bajas'] / max(stats['total_activos'], 1)) * 100, 1)
+                st.metric("Tasa de Rotación", f"{tasa}%")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                if not stats['df_deptos'].empty:
+                    fig = px.bar(stats['df_deptos'], x='departamento', y='cantidad',
+                                title='Trabajadores por Departamento',
+                                color='cantidad',
+                                color_continuous_scale='blues')
+                    st.plotly_chart(fig, use_container_width=True)
+            with col2:
+                if not stats['df_nomina'].empty:
+                    fig = px.pie(stats['df_nomina'], values='cantidad', names='tipo_nomina',
+                                title='Distribución por Tipo de Nómina',
+                                color_discrete_sequence=['#2ecc71', '#e74c3c'])
+                    st.plotly_chart(fig, use_container_width=True)
+        
+        except Exception as e:
+            st.error(f"Error: {str(e)}")
+        
+        st.markdown("---")
+        
+        st.subheader("🌾 Estadísticas de Cosecha y Envíos")
+        try:
+            cosecha_stats = get_stats_cosecha()
+            
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Total Cosechas", cosecha_stats['total_cosechas'])
+            with col2:
+                st.metric("Total Clams", f"{cosecha_stats['total_clams']:,.0f}")
+            with col3:
+                st.metric("Total Cajas Cosechadas", f"{cosecha_stats['total_cajas']:,.0f}")
+            with col4:
+                st.metric("Cajas Enviadas a Enfriado", f"{cosecha_stats['cajas_enviadas']:,.0f}")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("📦 Cajas Disponibles en Inventario", f"{cosecha_stats['cajas_disponibles']:,.0f}")
+            
+            with col2:
+                porcentaje_enviado = (cosecha_stats['cajas_enviadas'] / max(cosecha_stats['total_cajas'], 1)) * 100
+                st.metric("📊 % de Producción Enviada", f"{porcentaje_enviado:.1f}%")
+            
+            if not cosecha_stats['cosechas_por_tipo'].empty:
+                fig = px.bar(cosecha_stats['cosechas_por_tipo'], x='tipo_cosecha', y='cantidad',
+                            title='Cosechas por Tipo',
+                            color='cantidad',
+                            color_continuous_scale='greens')
+                st.plotly_chart(fig, use_container_width=True)
+        
+        except Exception as e:
+            st.error(f"Error: {str(e)}")
+        
+        st.markdown("---")
+        
+        st.subheader("❄️ Estadísticas de Envíos a Enfriado")
+        try:
+            stats_envios = get_stats_envios_avanzado()
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Total Cajas Enviadas", f"{stats_envios['total_cajas']:,.0f}")
+            with col2:
+                st.metric("Total Envíos Realizados", len(stats_envios['envios_diarios']) if not stats_envios['envios_diarios'].empty else 0)
+            with col3:
+                st.metric("Balance en Inventario", f"{cosecha_stats['cajas_disponibles']:,.0f}")
+        
+        except Exception as e:
+            st.error(f"Error: {str(e)}")
+        
+        st.markdown("---")
+        st.subheader("📋 Últimas Cosechas Registradas")
+        try:
+            cosechas_recientes = get_cosechas()
+            if not cosechas_recientes.empty:
+                st.dataframe(cosechas_recientes.head(10), use_container_width=True)
+            else:
+                st.info("No hay cosechas registradas")
+        except Exception as e:
+            st.error(f"Error al cargar cosechas: {str(e)}")
+    
+    elif st.session_state.menu == "🕐 Control Asistencia":
+        mostrar_control_asistencia()
+    
+    elif st.session_state.menu == "❄️ Envíos a Enfriado":
+        mostrar_envios_enfriado()
+    
+    elif st.session_state.menu == "📱 Generar QR":
+        st.header("📱 Generación de Códigos QR")
+        
+        tab1, tab2 = st.tabs(["QR Individual", "QR Masivo"])
+        
+        with tab1:
+            st.subheader("Generar QR para un Trabajador")
+            
+            trabajadores = get_all_workers()
+            if not trabajadores.empty:
+                trabajador_seleccionado = st.selectbox(
+                    "Seleccionar trabajador:",
+                    trabajadores.apply(lambda x: f"{x['id']} - {x['nombre']} {x['apellido_paterno']} ({x['puesto']})", axis=1),
+                    key="qr_trabajador_select"
+                )
+                
+                if trabajador_seleccionado:
+                    worker_id = int(trabajador_seleccionado.split(' - ')[0])
+                    
+                    if st.button("🔲 Generar QR", use_container_width=True):
+                        archivo, contenido = generar_qr_trabajador(worker_id)
+                        if archivo:
+                            st.success(f"QR generado exitosamente")
+                            st.info(f"Contenido del QR: {contenido}")
+                            
+                            img = Image.open(archivo)
+                            st.image(img, caption="Código QR", width=200)
+                            
+                            with open(archivo, "rb") as file:
+                                st.download_button(
+                                    label="📥 Descargar QR",
+                                    data=file,
+                                    file_name=f"qr_{worker_id}.png",
+                                    mime="image/png"
+                                )
+            else:
+                st.warning("No hay trabajadores registrados")
+        
+        with tab2:
+            st.subheader("Generación Masiva de QR")
+            
+            trabajadores = get_all_workers()
+            if not trabajadores.empty:
+                trabajadores_lista = trabajadores.apply(
+                    lambda x: f"{x['id']} - {x['nombre']} {x['apellido_paterno']} ({x['puesto']})", 
+                    axis=1
+                ).tolist()
+                
+                seleccionados = st.multiselect("Seleccionar trabajadores:", trabajadores_lista, key="qr_masivo_select")
+                
+                if seleccionados:
+                    ids_seleccionados = [int(s.split(' - ')[0]) for s in seleccionados]
+                    st.info(f"Seleccionados: {len(ids_seleccionados)} trabajadores")
+                    
+                    if st.button("🔲 Generar QR Masivo", use_container_width=True):
+                        with st.spinner("Generando códigos QR..."):
+                            archivos = generar_qr_masivo(ids_seleccionados)
+                            
+                            if archivos:
+                                st.success(f"Se generaron {len(archivos)} códigos QR")
+                                
+                                trabajadores_info = []
+                                for tid in ids_seleccionados:
+                                    worker = get_worker_by_id(tid)
+                                    if worker:
+                                        trabajadores_info.append({
+                                            'id': worker['id'],
+                                            'nombre': f"{worker['nombre']} {worker['apellido_paterno']}",
+                                            'puesto': worker['puesto_nombre']
+                                        })
+                                
+                                pdf_file = crear_pdf_qr(archivos, trabajadores_info)
+                                if pdf_file:
+                                    with open(pdf_file, "rb") as file:
+                                        st.download_button(
+                                            label="📄 Descargar PDF con todos los QR",
+                                            data=file,
+                                            file_name="todos_los_qr.pdf",
+                                            mime="application/pdf"
+                                        )
+                                
+                                st.subheader("Vista previa (primeros 3)")
+                                cols = st.columns(3)
+                                for i, archivo in enumerate(archivos[:3]):
+                                    with cols[i]:
+                                        img = Image.open(archivo)
+                                        st.image(img, width=150)
+            else:
+                st.warning("No hay trabajadores registrados")
+    
+    elif st.session_state.menu == "📋 Reportes":
+        st.header("📊 Reportes")
+        
+        tab1, tab2, tab3 = st.tabs(["📥 Ingresos", "📤 Bajas", "📋 Nómina Activa"])
+        
+        with tab1:
+            st.subheader("Ingresos de la Semana")
+            if st.button("Generar reporte", key="btn_ingresos", use_container_width=True):
+                df, inicio, fin = get_report_ingresos_semana()
+                if df.empty:
+                    st.warning(f"No hay ingresos entre {inicio.date()} y {fin.date()}")
                 else:
-                    st.info("No hay cosechas registradas")
-        else:
-            menu_functions[st.session_state.menu]()
+                    st.success(f"Encontrados: {len(df)}")
+                    st.dataframe(df, use_container_width=True)
+                    
+                    output = export_to_excel(df, "Ingresos")
+                    st.download_button("📥 Descargar Excel", data=output,
+                                     file_name=f"ingresos_{inicio.date()}.xlsx",
+                                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        
+        with tab2:
+            st.subheader("Bajas de la Semana")
+            if st.button("Generar reporte", key="btn_bajas", use_container_width=True):
+                df, inicio, fin = get_report_bajas_semana()
+                if df.empty:
+                    st.warning(f"No hay bajas entre {inicio.date()} y {fin.date()}")
+                else:
+                    st.success(f"Encontradas: {len(df)}")
+                    st.dataframe(df, use_container_width=True)
+                    
+                    output = export_to_excel(df, "Bajas")
+                    st.download_button("📥 Descargar Excel", data=output,
+                                     file_name=f"bajas_{inicio.date()}.xlsx",
+                                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        
+        with tab3:
+            st.subheader("Nómina Activa")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                deptos_list = ["Todos"] + get_departamentos_nombres()
+                depto = st.selectbox("Departamento", deptos_list, key="depto_nomina")
+            with col2:
+                subs_list = ["Todos"] + get_subdepartamentos_nombres()
+                sub = st.selectbox("Subdepartamento", subs_list, key="sub_nomina")
+            
+            if st.button("Generar reporte", key="btn_nomina", use_container_width=True):
+                df, resumen = get_report_nomina_activa(depto, sub)
+                if df.empty:
+                    st.warning("No hay trabajadores activos")
+                else:
+                    st.success(f"Total: {len(df)}")
+                    
+                    st.subheader("Resumen por Departamento")
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.dataframe(resumen, use_container_width=True)
+                    with col2:
+                        if not resumen.empty:
+                            fig = px.bar(resumen, x='departamento', y='cantidad',
+                                        title='Distribución por Departamento',
+                                        color='cantidad',
+                                        color_continuous_scale='viridis')
+                            st.plotly_chart(fig, use_container_width=True)
+                    
+                    st.subheader("Detalle de Trabajadores")
+                    st.dataframe(df, use_container_width=True)
+                    
+                    output = BytesIO()
+                    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+                        df.to_excel(writer, index=False, sheet_name="Nómina Activa")
+                        resumen.to_excel(writer, index=False, sheet_name="Resumen")
+                    output.seek(0)
+                    
+                    st.download_button("📥 Descargar Excel", data=output,
+                                     file_name=f"nomina_activa_{datetime.now().date()}.xlsx",
+                                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    
+    elif st.session_state.menu == "📚 Catálogos":
+        st.header("📋 Gestión de Catálogos")
+        
+        tab1, tab2, tab3 = st.tabs(["🏢 Departamentos", "📂 Subdepartamentos", "💼 Puestos"])
+        
+        with tab1:
+            st.subheader("Administrar Departamentos")
+            
+            with st.form("new_depto"):
+                new_depto = st.text_input("Nuevo departamento")
+                if st.form_submit_button("➕ Agregar", use_container_width=True):
+                    if new_depto:
+                        success, msg = add_catalog_item("departamentos", new_depto)
+                        if success:
+                            st.success(msg)
+                            st.rerun()
+                        else:
+                            st.error(msg)
+            
+            st.markdown("---")
+            
+            deptos = get_departamentos()
+            
+            if deptos:
+                for id_depto, nombre in deptos:
+                    with st.container():
+                        cols = st.columns([4, 1, 1])
+                        
+                        with cols[0]:
+                            st.write(f"**{nombre}**")
+                        
+                        with cols[1]:
+                            if st.button("✏️ Editar", key=f"edit_depto_{id_depto}"):
+                                st.session_state[f'editing_depto_{id_depto}'] = True
+                        
+                        with cols[2]:
+                            if st.button("🗑️ Eliminar", key=f"del_depto_{id_depto}"):
+                                st.session_state[f'deleting_depto_{id_depto}'] = True
+                        
+                        if st.session_state.get(f'editing_depto_{id_depto}', False):
+                            with st.form(key=f"form_edit_depto_{id_depto}"):
+                                nuevo_nombre = st.text_input("Editar nombre", value=nombre)
+                                col1, col2 = st.columns(2)
+                                with col1:
+                                    if st.form_submit_button("💾 Guardar"):
+                                        success, msg = update_catalog_item("departamentos", id_depto, nuevo_nombre)
+                                        if success:
+                                            st.success(msg)
+                                            del st.session_state[f'editing_depto_{id_depto}']
+                                            st.rerun()
+                                        else:
+                                            st.error(msg)
+                                with col2:
+                                    if st.form_submit_button("❌ Cancelar"):
+                                        del st.session_state[f'editing_depto_{id_depto}']
+                                        st.rerun()
+                        
+                        if st.session_state.get(f'deleting_depto_{id_depto}', False):
+                            st.warning(f"¿Eliminar '{nombre}'?")
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                if st.button("✅ Sí, eliminar", key=f"conf_del_depto_{id_depto}"):
+                                    success, msg = delete_catalog_item("departamentos", id_depto)
+                                    if success:
+                                        st.success(msg)
+                                        del st.session_state[f'deleting_depto_{id_depto}']
+                                        st.rerun()
+                                    else:
+                                        st.error(msg)
+                            with col2:
+                                if st.button("❌ No, cancelar", key=f"cancel_del_depto_{id_depto}"):
+                                    del st.session_state[f'deleting_depto_{id_depto}']
+                                    st.rerun()
+                        
+                        st.markdown("---")
+            else:
+                st.info("No hay departamentos. Agrega uno usando el formulario de arriba.")
+        
+        with tab2:
+            st.subheader("Administrar Subdepartamentos")
+            
+            with st.form("new_subdepto"):
+                new_subdepto = st.text_input("Nuevo subdepartamento")
+                if st.form_submit_button("➕ Agregar", use_container_width=True):
+                    if new_subdepto:
+                        success, msg = add_catalog_item("subdepartamentos", new_subdepto)
+                        if success:
+                            st.success(msg)
+                            st.rerun()
+                        else:
+                            st.error(msg)
+            
+            st.markdown("---")
+            
+            subdeptos = get_subdepartamentos()
+            
+            if subdeptos:
+                for id_sub, nombre in subdeptos:
+                    with st.container():
+                        cols = st.columns([4, 1, 1])
+                        
+                        with cols[0]:
+                            st.write(f"**{nombre}**")
+                        
+                        with cols[1]:
+                            if st.button("✏️ Editar", key=f"edit_sub_{id_sub}"):
+                                st.session_state[f'editing_sub_{id_sub}'] = True
+                        
+                        with cols[2]:
+                            if st.button("🗑️ Eliminar", key=f"del_sub_{id_sub}"):
+                                st.session_state[f'deleting_sub_{id_sub}'] = True
+                        
+                        if st.session_state.get(f'editing_sub_{id_sub}', False):
+                            with st.form(key=f"form_edit_sub_{id_sub}"):
+                                nuevo_nombre = st.text_input("Editar nombre", value=nombre)
+                                col1, col2 = st.columns(2)
+                                with col1:
+                                    if st.form_submit_button("💾 Guardar"):
+                                        success, msg = update_catalog_item("subdepartamentos", id_sub, nuevo_nombre)
+                                        if success:
+                                            st.success(msg)
+                                            del st.session_state[f'editing_sub_{id_sub}']
+                                            st.rerun()
+                                        else:
+                                            st.error(msg)
+                                with col2:
+                                    if st.form_submit_button("❌ Cancelar"):
+                                        del st.session_state[f'editing_sub_{id_sub}']
+                                        st.rerun()
+                        
+                        if st.session_state.get(f'deleting_sub_{id_sub}', False):
+                            st.warning(f"¿Eliminar '{nombre}'?")
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                if st.button("✅ Sí, eliminar", key=f"conf_del_sub_{id_sub}"):
+                                    success, msg = delete_catalog_item("subdepartamentos", id_sub)
+                                    if success:
+                                        st.success(msg)
+                                        del st.session_state[f'deleting_sub_{id_sub}']
+                                        st.rerun()
+                                    else:
+                                        st.error(msg)
+                            with col2:
+                                if st.button("❌ No, cancelar", key=f"cancel_del_sub_{id_sub}"):
+                                    del st.session_state[f'deleting_sub_{id_sub}']
+                                    st.rerun()
+                        
+                        st.markdown("---")
+            else:
+                st.info("No hay subdepartamentos. Agrega uno usando el formulario de arriba.")
+        
+        with tab3:
+            st.subheader("Administrar Puestos")
+            
+            with st.form("new_puesto"):
+                new_puesto = st.text_input("Nuevo puesto")
+                if st.form_submit_button("➕ Agregar", use_container_width=True):
+                    if new_puesto:
+                        success, msg = add_catalog_item("puestos", new_puesto)
+                        if success:
+                            st.success(msg)
+                            st.rerun()
+                        else:
+                            st.error(msg)
+            
+            st.markdown("---")
+            
+            puestos = get_puestos()
+            
+            if puestos:
+                for id_puesto, nombre in puestos:
+                    with st.container():
+                        cols = st.columns([4, 1, 1])
+                        
+                        with cols[0]:
+                            st.write(f"**{nombre}**")
+                        
+                        with cols[1]:
+                            if st.button("✏️ Editar", key=f"edit_puesto_{id_puesto}"):
+                                st.session_state[f'editing_puesto_{id_puesto}'] = True
+                        
+                        with cols[2]:
+                            if st.button("🗑️ Eliminar", key=f"del_puesto_{id_puesto}"):
+                                st.session_state[f'deleting_puesto_{id_puesto}'] = True
+                        
+                        if st.session_state.get(f'editing_puesto_{id_puesto}', False):
+                            with st.form(key=f"form_edit_puesto_{id_puesto}"):
+                                nuevo_nombre = st.text_input("Editar nombre", value=nombre)
+                                col1, col2 = st.columns(2)
+                                with col1:
+                                    if st.form_submit_button("💾 Guardar"):
+                                        success, msg = update_catalog_item("puestos", id_puesto, nuevo_nombre)
+                                        if success:
+                                            st.success(msg)
+                                            del st.session_state[f'editing_puesto_{id_puesto}']
+                                            st.rerun()
+                                        else:
+                                            st.error(msg)
+                                with col2:
+                                    if st.form_submit_button("❌ Cancelar"):
+                                        del st.session_state[f'editing_puesto_{id_puesto}']
+                                        st.rerun()
+                        
+                        if st.session_state.get(f'deleting_puesto_{id_puesto}', False):
+                            st.warning(f"¿Eliminar '{nombre}'?")
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                if st.button("✅ Sí, eliminar", key=f"conf_del_puesto_{id_puesto}"):
+                                    success, msg = delete_catalog_item("puestos", id_puesto)
+                                    if success:
+                                        st.success(msg)
+                                        del st.session_state[f'deleting_puesto_{id_puesto}']
+                                        st.rerun()
+                                    else:
+                                        st.error(msg)
+                            with col2:
+                                if st.button("❌ No, cancelar", key=f"cancel_del_puesto_{id_puesto}"):
+                                    del st.session_state[f'deleting_puesto_{id_puesto}']
+                                    st.rerun()
+                        
+                        st.markdown("---")
+            else:
+                st.info("No hay puestos. Agrega uno usando el formulario de arriba.")
+    
+    elif st.session_state.menu == "📈 Asistencia Stats":
+        mostrar_dashboard_asistencia()
+    
+    elif st.session_state.menu == "🏭 Gestión Invernaderos":
+        mostrar_gestion_invernaderos()
+
+# ==========================================
+# EJECUTAR APLICACIÓN
+# ==========================================
 
 if __name__ == "__main__":
     main()
