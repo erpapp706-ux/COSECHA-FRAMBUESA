@@ -3463,8 +3463,8 @@ def main():
             st.error("❌ No tienes permisos para acceder a esta sección.")
         else:
             mostrar_gestion_usuarios()
-    elif st.session_state.menu == "🔒 Cierre de Día":
+    elif st.session_state.menu == "🔒 Gestion de usuarios":
         mostrar_cierre_dia()
-
+ elif st.session_state.menu == "🔒 Cierre de Día":
 if __name__ == "__main__":
     main()
