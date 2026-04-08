@@ -104,13 +104,12 @@ def get_configuracion_sistema(clave):
 def register_user(email, password, nombre, rol='supervisor', permisos=None, invernaderos_asignados=None):
     try:
         email = email.strip().lower()
-        # Email confirmation deshabilitada
         response = supabase.auth.sign_up({
             "email": email, 
             "password": password, 
             "options": {
                 "data": {"nombre": nombre},
-                "email_confirm": False   # <-- CORREGIDO: ya no pide confirmación
+                "email_confirm": True
             }
         })
         
@@ -253,7 +252,7 @@ def show_login_page():
                             result = register_user(reg_email, reg_password, reg_nombre, reg_rol)
                             if result['success']:
                                 st.success(result['message'])
-                                st.info("Ahora puedes iniciar sesión (no se requiere confirmación de email)")
+                                st.info("Ahora puedes iniciar sesión")
                             else:
                                 st.error(result['error'])
                     else:
@@ -447,9 +446,7 @@ def get_all_invernaderos():
     try:
         result = supabase.table('invernaderos').select('id, nombre, ubicacion, lineas_totales').eq('activo', True).order('nombre').execute()
         return [(row['id'], row['nombre'], row['ubicacion'], row.get('lineas_totales', 40)) for row in result.data]
-    except Exception as e:
-        # Mostrar error en depuración
-        st.error(f"Error al obtener invernaderos: {str(e)}")
+    except:
         return []
 
 def get_invernaderos_usuario():
@@ -3387,7 +3384,6 @@ def mostrar_formulario_asistencia_instant(id_trabajador, nombre):
             st.session_state.show_form = False
             st.session_state.scanned_worker = None
             st.rerun()
-
 # ==========================================
 # INTERFAZ DE GESTIÓN DE USUARIOS
 # ==========================================
@@ -3405,7 +3401,7 @@ def mostrar_gestion_usuarios():
         st.subheader("Usuarios del Sistema")
         usuarios = get_all_users()
         if not usuarios.empty:
-            for idx, (_, usuario) in enumerate(usuarios.iterrows()):
+            for _, usuario in usuarios.iterrows():
                 with st.expander(f"👤 {usuario.get('nombre', 'Sin nombre')} - {usuario['email']} ({usuario.get('rol', 'supervisor')})"):
                     col1, col2 = st.columns(2)
                     with col1:
@@ -3421,18 +3417,18 @@ def mostrar_gestion_usuarios():
                     
                     col_acc1, col_acc2, col_acc3 = st.columns(3)
                     with col_acc1:
-                        if st.button("✏️ Editar", key=f"edit_{idx}"):
-                            st.session_state[f'editing_{idx}'] = True
+                        if st.button("✏️ Editar", key=f"edit_{usuario['id']}"):
+                            st.session_state[f'editing_{usuario["id"]}'] = True
                     with col_acc2:
-                        if st.button("🔑 Resetear Password", key=f"reset_{idx}"):
-                            st.session_state[f'reset_{idx}'] = True
+                        if st.button("🔑 Resetear Password", key=f"reset_{usuario['id']}"):
+                            st.session_state[f'reset_{usuario["id"]}'] = True
                     with col_acc3:
                         if usuario['email'] != st.session_state.get('user_email'):
-                            if st.button("🗑️ Eliminar", key=f"delete_{idx}"):
-                                st.session_state[f'delete_{idx}'] = True
+                            if st.button("🗑️ Eliminar", key=f"delete_{usuario['id']}"):
+                                st.session_state[f'delete_{usuario["id"]}'] = True
                     
-                    if st.session_state.get(f'editing_{idx}', False):
-                        with st.form(key=f"form_edit_{idx}"):
+                    if st.session_state.get(f'editing_{usuario["id"]}', False):
+                        with st.form(key=f"form_edit_{usuario['id']}"):
                             nuevo_rol = st.selectbox("Rol", ["admin", "supervisor"], index=0 if usuario.get('rol') == 'admin' else 1)
                             invernaderos = get_all_invernaderos()
                             invernaderos_actuales = usuario.get('invernaderos_asignados', [])
@@ -3442,41 +3438,41 @@ def mostrar_gestion_usuarios():
                                 success, msg = update_user_permissions(usuario['id'], nuevo_rol, usuario.get('permisos', {}), invernaderos_ids)
                                 if success:
                                     st.success(msg)
-                                    del st.session_state[f'editing_{idx}']
+                                    del st.session_state[f'editing_{usuario["id"]}']
                                     st.rerun()
                                 else:
                                     st.error(msg)
                     
-                    if st.session_state.get(f'reset_{idx}', False):
-                        with st.form(key=f"form_reset_{idx}"):
+                    if st.session_state.get(f'reset_{usuario["id"]}', False):
+                        with st.form(key=f"form_reset_{usuario['id']}"):
                             new_pw = st.text_input("Nueva contraseña", type="password")
                             if st.form_submit_button("Actualizar contraseña"):
                                 if new_pw and len(new_pw) >= 6:
                                     success, msg = reset_user_password(usuario['id'], new_pw)
                                     if success:
                                         st.success(msg)
-                                        del st.session_state[f'reset_{idx}']
+                                        del st.session_state[f'reset_{usuario["id"]}']
                                         st.rerun()
                                     else:
                                         st.error(msg)
                                 else:
                                     st.error("Mínimo 6 caracteres")
                     
-                    if st.session_state.get(f'delete_{idx}', False):
+                    if st.session_state.get(f'delete_{usuario["id"]}', False):
                         st.warning(f"¿Eliminar a {usuario['nombre']}?")
                         col_yes, col_no = st.columns(2)
                         with col_yes:
-                            if st.button("✅ Sí", key=f"confirm_del_{idx}"):
+                            if st.button("✅ Sí", key=f"confirm_del_{usuario['id']}"):
                                 success, msg = delete_user(usuario['id'], usuario['email'])
                                 if success:
                                     st.success(msg)
-                                    del st.session_state[f'delete_{idx}']
+                                    del st.session_state[f'delete_{usuario["id"]}']
                                     st.rerun()
                                 else:
                                     st.error(msg)
                         with col_no:
-                            if st.button("❌ No", key=f"cancel_del_{idx}"):
-                                del st.session_state[f'delete_{idx}']
+                            if st.button("❌ No", key=f"cancel_del_{usuario['id']}"):
+                                del st.session_state[f'delete_{usuario["id"]}']
                                 st.rerun()
         else:
             st.info("No hay usuarios registrados")
@@ -3528,7 +3524,6 @@ def mostrar_gestion_usuarios():
                         st.error(msg)
         else:
             st.info("No hay supervisores registrados")
-
 # ==========================================
 # FUNCIÓN PRINCIPAL
 # ==========================================
