@@ -102,10 +102,8 @@ def get_configuracion_sistema(clave):
     return True
 
 def register_user(email, password, nombre, rol='supervisor', permisos=None, invernaderos_asignados=None):
-    """Registra un nuevo usuario"""
     try:
         email = email.strip().lower()
-        
         response = supabase.auth.sign_up({
             "email": email, 
             "password": password, 
@@ -147,7 +145,6 @@ def register_user(email, password, nombre, rol='supervisor', permisos=None, inve
         return {'success': False, 'error': f'Error: {error_msg}'}
 
 def login_user(email, password):
-    """Inicia sesión"""
     try:
         email = email.strip().lower()
         response = supabase.auth.sign_in_with_password({"email": email, "password": password})
@@ -294,6 +291,13 @@ def delete_user(user_id, email):
     except Exception as e:
         return False, f"❌ Error al eliminar: {str(e)}"
 
+def reset_user_password(user_id, new_password):
+    try:
+        supabase.auth.admin.update_user_by_id(user_id, {"password": new_password})
+        return True, "✅ Contraseña actualizada correctamente"
+    except Exception as e:
+        return False, f"❌ No se pudo cambiar la contraseña: {str(e)}"
+
 # ==========================================
 # FUNCIONES DE PERMISOS Y ASIGNACIONES
 # ==========================================
@@ -308,7 +312,6 @@ def get_permisos_modulos(usuario_id):
     return {}
 
 def get_modulos_visibles(usuario_id):
-    """Obtiene la lista de módulos que el usuario puede ver"""
     todos_modulos = {
         "registro_cosecha": "🌾 Registro Cosecha",
         "dashboard": "📊 Dashboard",
@@ -328,11 +331,9 @@ def get_modulos_visibles(usuario_id):
         "cierre_dia": "🔒 Cierre de Día"
     }
     
-    # ADMIN ve TODOS los módulos
     if st.session_state.get('user_rol') == 'admin':
         return todos_modulos
     
-    # Para supervisores, filtrar por permisos
     permisos = get_permisos_modulos(usuario_id)
     modulos_visibles = {}
     for key, name in todos_modulos.items():
@@ -374,24 +375,6 @@ def asignar_invernaderos_dia(usuario_id, invernaderos_ids, fecha, asignado_por):
         return True, f"✅ Asignación actualizada para {fecha}"
     except Exception as e:
         return False, f"❌ Error: {str(e)}"
-
-def get_asignaciones_por_dia(usuario_id, fecha_inicio=None, fecha_fin=None):
-    try:
-        query = supabase.table('asignaciones_invernaderos_dia').select('*, invernaderos:invernadero_id(nombre)').eq('usuario_id', usuario_id)
-        if fecha_inicio:
-            query = query.gte('fecha', fecha_inicio.isoformat())
-        if fecha_fin:
-            query = query.lte('fecha', fecha_fin.isoformat())
-        result = query.order('fecha', desc=True).execute()
-        data = []
-        for row in result.data:
-            data.append({
-                'fecha': row['fecha'],
-                'invernadero': row['invernaderos']['nombre'] if row['invernaderos'] else 'N/A',
-            })
-        return pd.DataFrame(data)
-    except:
-        return pd.DataFrame()
 
 # ==========================================
 # FUNCIONES DE UTILIDAD
