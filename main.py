@@ -3529,7 +3529,6 @@ def mostrar_gestion_usuarios():
 # ==========================================
 
 def main():
-  def main():
     global supabase
     supabase = init_supabase()
     if supabase is None:
