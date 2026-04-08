@@ -3463,8 +3463,86 @@ def main():
             st.error("❌ No tienes permisos para acceder a esta sección.")
         else:
             mostrar_gestion_usuarios()
-    elif st.session_state.menu == "🔒 Gestion de usuarios":
+   elif st.session_state.menu == "🔒 Cierre de Día":
         mostrar_cierre_dia()
- elif st.session_state.menu == "🔒 Cierre de Día":
+ 
+if __name__ == "__main__":
+    def main():
+    global supabase
+    supabase = init_supabase()
+    if supabase is None:
+        st.error("❌ No se pudo conectar a Supabase. Verifica tu configuración.")
+        st.stop()
+    if 'menu' not in st.session_state:
+        st.session_state.menu = "📊 Dashboard"
+    if 'authenticated' not in st.session_state:
+        st.session_state.authenticated = False
+    if not st.session_state.authenticated:
+        show_login_page()
+        return
+    
+    mostrar_menu_sidebar()
+    
+    if st.session_state.menu == "🌾 Registro Cosecha":
+        st.header("🌾 Registro de Cosecha")
+        tab1, tab2 = st.tabs(["📷 Escanear QR", "📝 Registrar Manual"])
+        with tab1:
+            escanear_qr_con_camara(tipo_evento="cosecha", mostrar_invernadero=True)
+        with tab2:
+            if not get_configuracion_sistema('registro_manual_cosecha'):
+                st.warning("⚠️ El registro manual de cosecha está deshabilitado por el administrador")
+            else:
+                formulario_cosecha_manual()
+        with st.expander("📋 Ver Cosechas Registradas"):
+            cosechas = get_cosechas()
+            if not cosechas.empty:
+                st.dataframe(cosechas, use_container_width=True)
+                output = export_to_excel(cosechas, "Cosechas")
+                st.download_button("📥 Exportar a Excel", data=output, file_name=f"cosechas_{get_mexico_date()}.xlsx")
+            else:
+                st.info("No hay cosechas registradas")
+    elif st.session_state.menu == "👥 Gestión Personal":
+        if st.session_state.get('user_rol') != 'admin':
+            st.error("❌ No tienes permisos para acceder a esta sección.")
+        else:
+            mostrar_gestion_personal()
+    elif st.session_state.menu == "📊 Dashboard":
+        mostrar_dashboard_general()
+    elif st.session_state.menu == "📈 Proyecciones":
+        mostrar_proyecciones()
+    elif st.session_state.menu == "🕐 Control Asistencia":
+        mostrar_control_asistencia()
+    elif st.session_state.menu == "📊 Avance Cosecha":
+        mostrar_avance_cosecha()
+    elif st.session_state.menu == "❄️ Traslado a Cámara Fría":
+        mostrar_traslados_camara_fria()
+    elif st.session_state.menu == "🗑️ Gestión Merma":
+        mostrar_gestion_merma()
+    elif st.session_state.menu == "📦 Cajas en Mesa":
+        mostrar_cajas_mesa()
+    elif st.session_state.menu == "📱 Generar QR":
+        if st.session_state.get('user_rol') != 'admin':
+            st.error("❌ No tienes permisos para acceder a esta sección.")
+        else:
+            mostrar_generar_qr()
+    elif st.session_state.menu == "📊 Registros QR":
+        mostrar_reportes_qr()
+    elif st.session_state.menu == "📋 Reportes":
+        mostrar_reportes()
+    elif st.session_state.menu == "📚 Catálogos":
+        if st.session_state.get('user_rol') != 'admin':
+            st.error("❌ No tienes permisos para acceder a esta sección.")
+        else:
+            mostrar_catalogos()
+    elif st.session_state.menu == "🏭 Gestión Invernaderos":
+        mostrar_gestion_invernaderos()
+    elif st.session_state.menu == "👥 Gestión Usuarios":
+        if st.session_state.get('user_rol') != 'admin':
+            st.error("❌ No tienes permisos para acceder a esta sección.")
+        else:
+            mostrar_gestion_usuarios()
+    elif st.session_state.menu == "🔒 Cierre de Día":
+        mostrar_cierre_dia()
+
 if __name__ == "__main__":
     main()
