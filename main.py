@@ -102,48 +102,60 @@ def get_configuracion_sistema(clave):
     return True
 
 def register_user(email, password, nombre, rol='supervisor', permisos=None, invernaderos_asignados=None):
-    """Registra un nuevo usuario en el sistema"""
+    """Registra un nuevo usuario - VERSIÓN CORREGIDA"""
     try:
-        permisos_default = {
-            "registro_cosecha": True, "dashboard": True, "proyecciones": True, "control_asistencia": True,
-            "avance_cosecha": True, "traslado_camara_fria": True, "gestion_merma": True, "cajas_mesa": True,
-            "registros_qr": True, "reportes": True, "gestion_invernaderos": False, "gestion_personal": False,
-            "gestion_usuarios": False, "generar_qr": False, "catalogos": False, "cierre_dia": False
-        }
-        if permisos:
-            permisos_default.update(permisos)
+        email = email.strip().lower()
         
         response = supabase.auth.sign_up({
             "email": email, 
             "password": password, 
-            "options": {"data": {"nombre": nombre}}
+            "options": {
+                "data": {"nombre": nombre},
+                "email_confirm": True
+            }
         })
         
         if response.user:
-            supabase.table('perfiles_usuario').insert({
-                'id': response.user.id,
+            user_id = response.user.id
+            
+            permisos_default = {
+                "registro_cosecha": True, "dashboard": True, "proyecciones": True, "control_asistencia": True,
+                "avance_cosecha": True, "traslado_camara_fria": True, "gestion_merma": True, "cajas_mesa": True,
+                "registros_qr": True, "reportes": True, "gestion_invernaderos": False, "gestion_personal": False,
+                "gestion_usuarios": False, "generar_qr": False, "catalogos": False, "cierre_dia": False
+            }
+            if permisos:
+                permisos_default.update(permisos)
+            
+            supabase.table('perfiles_usuario').upsert({
+                'id': user_id,
                 'email': email,
                 'nombre': nombre,
                 'rol': rol,
                 'permisos': permisos_default,
                 'invernaderos_asignados': invernaderos_asignados or []
             }).execute()
-            return {'success': True, 'message': f'Usuario {nombre} creado exitosamente'}
+            
+            return {'success': True, 'message': f'✅ Usuario {nombre} creado exitosamente'}
         else:
             return {'success': False, 'error': 'No se pudo crear el usuario'}
             
     except Exception as e:
         error_msg = str(e)
-        if "User already registered" in error_msg or "duplicate key" in error_msg.lower():
-            return {'success': False, 'error': 'El correo ya está registrado'}
-        return {'success': False, 'error': f'Error al registrar: {error_msg}'}
+        if "User already registered" in error_msg:
+            return {'success': False, 'error': 'El email ya está registrado'}
+        return {'success': False, 'error': f'Error: {error_msg}'}
 
 def login_user(email, password):
-    """Inicia sesión y verifica/crea el perfil si es necesario"""
+    """Inicia sesión - VERSIÓN CORREGIDA"""
     try:
+        email = email.strip().lower()
         response = supabase.auth.sign_in_with_password({"email": email, "password": password})
+        
         if response.user:
-            perfil = supabase.table('perfiles_usuario').select('*').eq('id', response.user.id).execute()
+            user_id = response.user.id
+            
+            perfil = supabase.table('perfiles_usuario').select('*').eq('id', user_id).execute()
             
             if not perfil.data:
                 permisos_default = {
@@ -152,17 +164,19 @@ def login_user(email, password):
                     "registros_qr": True, "reportes": True, "gestion_invernaderos": False, "gestion_personal": False,
                     "gestion_usuarios": False, "generar_qr": False, "catalogos": False, "cierre_dia": False
                 }
+                
                 nombre = response.user.user_metadata.get('nombre', email.split('@')[0])
                 
                 supabase.table('perfiles_usuario').insert({
-                    'id': response.user.id,
+                    'id': user_id,
                     'email': email,
                     'nombre': nombre,
                     'rol': 'supervisor',
                     'permisos': permisos_default,
                     'invernaderos_asignados': []
                 }).execute()
-                perfil = supabase.table('perfiles_usuario').select('*').eq('id', response.user.id).execute()
+                
+                perfil = supabase.table('perfiles_usuario').select('*').eq('id', user_id).execute()
             
             rol = 'supervisor'
             nombre = email.split('@')[0]
@@ -177,7 +191,7 @@ def login_user(email, password):
             
             return {
                 'success': True, 
-                'user_id': response.user.id, 
+                'user_id': user_id, 
                 'email': email, 
                 'rol': rol, 
                 'nombre': nombre, 
@@ -272,7 +286,6 @@ def update_user_permissions(user_id, rol, permisos, invernaderos_asignados):
         return False, f"❌ Error: {str(e)}"
 
 def delete_user(user_id, email):
-    """Elimina un usuario del sistema"""
     try:
         supabase.table('asignaciones_invernaderos_dia').delete().eq('usuario_id', user_id).execute()
         supabase.table('perfiles_usuario').delete().eq('id', user_id).execute()
@@ -280,14 +293,6 @@ def delete_user(user_id, email):
         return True, f"✅ Usuario {email} eliminado correctamente"
     except Exception as e:
         return False, f"❌ Error al eliminar: {str(e)}"
-
-def reset_user_password(user_id, new_password):
-    """Resetea la contraseña de un usuario"""
-    try:
-        supabase.auth.admin.update_user_by_id(user_id, {"password": new_password})
-        return True, "✅ Contraseña actualizada correctamente"
-    except Exception as e:
-        return False, f"❌ Error: {str(e)}"
 
 # ==========================================
 # FUNCIONES DE PERMISOS Y ASIGNACIONES
@@ -3248,7 +3253,7 @@ def mostrar_menu_sidebar():
         logout_user()
 
 # ==========================================
-# FUNCIÓN PRINCIPAL
+# FUNCIONES DE ESCANEO QR
 # ==========================================
 
 def escanear_qr_con_camara(tipo_evento="asistencia", mostrar_invernadero=False):
@@ -3396,6 +3401,10 @@ def mostrar_formulario_asistencia_instant(id_trabajador, nombre):
             st.session_state.show_form = False
             st.session_state.scanned_worker = None
             st.rerun()
+
+# ==========================================
+# FUNCIÓN PRINCIPAL
+# ==========================================
 
 def main():
     global supabase
