@@ -102,7 +102,7 @@ def get_configuracion_sistema(clave):
     return True
 
 def register_user(email, password, nombre, rol='supervisor', permisos=None, invernaderos_asignados=None):
-    """Registra un nuevo usuario - VERSIÓN CORREGIDA"""
+    """Registra un nuevo usuario"""
     try:
         email = email.strip().lower()
         
@@ -147,7 +147,7 @@ def register_user(email, password, nombre, rol='supervisor', permisos=None, inve
         return {'success': False, 'error': f'Error: {error_msg}'}
 
 def login_user(email, password):
-    """Inicia sesión - VERSIÓN CORREGIDA"""
+    """Inicia sesión"""
     try:
         email = email.strip().lower()
         response = supabase.auth.sign_in_with_password({"email": email, "password": password})
@@ -307,13 +307,8 @@ def get_permisos_modulos(usuario_id):
         pass
     return {}
 
-def usuario_puede_ver_modulo(usuario_id, modulo):
-    if st.session_state.get('user_rol') == 'admin':
-        return True
-    permisos = get_permisos_modulos(usuario_id)
-    return permisos.get(modulo, False)
-
 def get_modulos_visibles(usuario_id):
+    """Obtiene la lista de módulos que el usuario puede ver"""
     todos_modulos = {
         "registro_cosecha": "🌾 Registro Cosecha",
         "dashboard": "📊 Dashboard",
@@ -332,13 +327,18 @@ def get_modulos_visibles(usuario_id):
         "catalogos": "📚 Catálogos",
         "cierre_dia": "🔒 Cierre de Día"
     }
+    
+    # ADMIN ve TODOS los módulos
     if st.session_state.get('user_rol') == 'admin':
         return todos_modulos
+    
+    # Para supervisores, filtrar por permisos
     permisos = get_permisos_modulos(usuario_id)
     modulos_visibles = {}
     for key, name in todos_modulos.items():
         if permisos.get(key, False):
             modulos_visibles[key] = name
+    
     return modulos_visibles
 
 def get_invernaderos_asignados_dia(usuario_id, fecha=None):
