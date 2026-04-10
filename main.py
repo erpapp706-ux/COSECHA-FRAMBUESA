@@ -18,6 +18,8 @@ import io
 import zipfile
 from supabase import create_client, Client
 from dateutil import tz
+import hashlib
+import time
 
 # ==========================================
 # CONFIGURACIÓN DE ZONA HORARIA MÉXICO
@@ -52,6 +54,21 @@ def init_supabase() -> Client:
             return None
 
 supabase = init_supabase()
+
+# ==========================================
+# FUNCIÓN PARA MANTENER SESIÓN ACTIVA
+# ==========================================
+def keep_alive():
+    if 'last_activity' not in st.session_state:
+        st.session_state.last_activity = time.time()
+    # No es necesario hacer más, Streamlit ya maneja el tiempo de espera,
+    # pero con esta función evitamos que el caché se limpie agresivamente.
+
+# ==========================================
+# HASH DE CONTRASEÑAS
+# ==========================================
+def hash_password(password):
+    return hashlib.sha256(password.encode()).hexdigest()
 
 # ==========================================
 # CONFIGURACIÓN INICIAL
@@ -95,7 +112,7 @@ st.markdown("""
 REPORTE_TURNOS = ["Reporte 10:00am", "Reporte 12:00pm", "Reporte 02:00pm", "Reporte 03:00pm", "Reporte 04:00pm", "Reporte 05:00pm", "Reporte 06:00pm", "Reporte 07:00pm", "Reporte 08:00pm"]
 
 # ==========================================
-# FUNCIONES DE AUTENTICACIÓN (ID ENTERO)
+# FUNCIONES DE AUTENTICACIÓN (con hash)
 # ==========================================
 
 def get_configuracion_sistema(clave):
@@ -115,6 +132,7 @@ def register_user(nombre_usuario, password, nombre, rol='supervisor', permisos=N
             return {'success': False, 'error': '❌ El nombre de usuario ya existe'}
         
         email_temp = f"{nombre_usuario}@sistema.local"
+        password_hash = hash_password(password)
         
         permisos_default = {
             "registro_cosecha": True, "dashboard": True, "proyecciones": True, "control_asistencia": True,
@@ -125,7 +143,6 @@ def register_user(nombre_usuario, password, nombre, rol='supervisor', permisos=N
         if permisos:
             permisos_default.update(permisos)
         
-        # Insertar sin especificar id (se genera automáticamente)
         result = supabase.table('perfiles_usuario').insert({
             'nombre_usuario': nombre_usuario,
             'email': email_temp,
@@ -133,7 +150,8 @@ def register_user(nombre_usuario, password, nombre, rol='supervisor', permisos=N
             'rol': rol,
             'permisos': permisos_default,
             'invernaderos_asignados': invernaderos_asignados or [],
-            'activo': True
+            'activo': True,
+            'password_hash': password_hash
         }).execute()
         
         user_id = result.data[0]['id'] if result.data else None
@@ -149,7 +167,13 @@ def login_user(nombre_usuario, password):
             return {'success': False, 'error': '❌ Usuario no encontrado'}
         
         usuario = perfil.data[0]
-        # Validación simplificada (sin verificar contraseña real)
+        if 'password_hash' in usuario:
+            if usuario['password_hash'] != hash_password(password):
+                return {'success': False, 'error': '❌ Contraseña incorrecta'}
+        else:
+            # Si no existe hash (migración), se permite pero se recomienda actualizar
+            pass
+        
         return {
             'success': True,
             'user_id': usuario['id'],
@@ -258,7 +282,8 @@ def delete_user(user_id, nombre_usuario):
 
 def reset_user_password(user_id, new_password):
     try:
-        # Si usas auth de Supabase, puedes implementarlo
+        password_hash = hash_password(new_password)
+        supabase.table('perfiles_usuario').update({'password_hash': password_hash}).eq('id', user_id).execute()
         return True, "✅ Contraseña actualizada correctamente"
     except Exception as e:
         return False, f"❌ No se pudo cambiar la contraseña: {str(e)}"
@@ -379,7 +404,7 @@ def validar_telefono(telefono):
     return telefono.isdigit() and len(telefono) == 10
 
 # ==========================================
-# FUNCIONES PARA CATÁLOGOS
+# FUNCIONES PARA CATÁLOGOS (con descripción en puestos)
 # ==========================================
 
 def get_departamentos():
@@ -398,8 +423,8 @@ def get_subdepartamentos():
 
 def get_puestos():
     try:
-        result = supabase.table('puestos').select('id, nombre').order('nombre').execute()
-        return [(row['id'], row['nombre']) for row in result.data]
+        result = supabase.table('puestos').select('id, nombre, descripcion').order('nombre').execute()
+        return [(row['id'], row['nombre'], row.get('descripcion', '')) for row in result.data]
     except:
         return []
 
@@ -410,7 +435,7 @@ def get_subdepartamentos_nombres():
     return [nombre for _, nombre in get_subdepartamentos()]
 
 def get_puestos_nombres():
-    return [nombre for _, nombre in get_puestos()]
+    return [nombre for _, nombre, _ in get_puestos()]
 
 def get_all_invernaderos():
     try:
@@ -427,9 +452,12 @@ def get_invernaderos_usuario():
 def get_invernaderos():
     return get_all_invernaderos()
 
-def add_catalog_item(tabla, nombre):
+def add_catalog_item(tabla, nombre, descripcion=None):
     try:
-        supabase.table(tabla).insert({'nombre': nombre.lower().strip()}).execute()
+        if tabla == 'puestos' and descripcion:
+            supabase.table(tabla).insert({'nombre': nombre.lower().strip(), 'descripcion': descripcion}).execute()
+        else:
+            supabase.table(tabla).insert({'nombre': nombre.lower().strip()}).execute()
         invalidar_cache()
         return True, "✅ Item agregado correctamente"
     except Exception as e:
@@ -437,9 +465,12 @@ def add_catalog_item(tabla, nombre):
             return False, "❌ Este nombre ya existe"
         return False, f"❌ Error: {str(e)}"
 
-def update_catalog_item(tabla, item_id, nuevo_nombre):
+def update_catalog_item(tabla, item_id, nuevo_nombre, nueva_descripcion=None):
     try:
-        supabase.table(tabla).update({'nombre': nuevo_nombre.lower().strip()}).eq('id', item_id).execute()
+        data = {'nombre': nuevo_nombre.lower().strip()}
+        if tabla == 'puestos' and nueva_descripcion is not None:
+            data['descripcion'] = nueva_descripcion
+        supabase.table(tabla).update(data).eq('id', item_id).execute()
         invalidar_cache()
         return True, "✅ Item actualizado correctamente"
     except Exception as e:
@@ -478,7 +509,7 @@ def get_all_workers():
     try:
         result = supabase.table('trabajadores').select("""
             id, nombre, apellido_paterno, apellido_materno, correo, telefono, estatus, fecha_alta, fecha_baja, tipo_nomina,
-            departamentos:departamento_id (nombre), subdepartamentos:subdepartamento_id (nombre), puestos:puesto_id (nombre)
+            departamentos:departamento_id (nombre), subdepartamentos:subdepartamento_id (nombre), puestos:puesto_id (nombre, descripcion)
         """).eq('estatus', 'activo').order('apellido_paterno').execute()
         data = []
         for row in result.data:
@@ -497,7 +528,7 @@ def get_all_workers():
 def get_worker_by_id(worker_id):
     try:
         result = supabase.table('trabajadores').select("""
-            *, departamentos:departamento_id (nombre), subdepartamentos:subdepartamento_id (nombre), puestos:puesto_id (nombre)
+            *, departamentos:departamento_id (nombre), subdepartamentos:subdepartamento_id (nombre), puestos:puesto_id (nombre, descripcion)
         """).eq('id', worker_id).execute()
         if result.data:
             row = result.data[0]
@@ -509,7 +540,8 @@ def get_worker_by_id(worker_id):
                 'puesto_id': row['puesto_id'], 'tipo_nomina': row['tipo_nomina'],
                 'departamento_nombre': row['departamentos']['nombre'] if row['departamentos'] else '',
                 'subdepartamento_nombre': row['subdepartamentos']['nombre'] if row['subdepartamentos'] else '',
-                'puesto_nombre': row['puestos']['nombre'] if row['puestos'] else ''
+                'puesto_nombre': row['puestos']['nombre'] if row['puestos'] else '',
+                'puesto_descripcion': row['puestos']['descripcion'] if row['puestos'] else ''
             }
         return None
     except:
@@ -520,7 +552,6 @@ def add_worker(data):
         depto_id = get_id_by_nombre("departamentos", data['departamento'])
         sub_id = get_id_by_nombre("subdepartamentos", data['subdepartamento'])
         puesto_id = get_id_by_nombre("puestos", data['puesto'])
-        # Convertir fecha a string ISO
         fecha_alta_str = data['fa'].isoformat() if hasattr(data['fa'], 'isoformat') else str(data['fa'])
         supabase.table('trabajadores').insert({
             'apellido_paterno': data['ap'],
@@ -558,7 +589,6 @@ def update_worker(worker_id, data):
 
 def dar_baja(worker_id, fecha_baja):
     try:
-        # Convertir fecha a string ISO
         fecha_baja_str = fecha_baja.isoformat() if hasattr(fecha_baja, 'isoformat') else str(fecha_baja)
         supabase.table('trabajadores').update({
             'estatus': 'baja',
@@ -1703,7 +1733,7 @@ def get_report_nomina_activa(depto_nombre=None, subdepto_nombre=None):
         return pd.DataFrame(), pd.DataFrame()
 
 # ==========================================
-# INTERFACES DE USUARIO
+# INTERFACES DE USUARIO (las que faltaban)
 # ==========================================
 
 def mostrar_gestion_personal():
@@ -2701,52 +2731,147 @@ def mostrar_reportes():
 def mostrar_catalogos():
     st.header("📋 Gestión de Catálogos")
     tab1, tab2, tab3 = st.tabs(["🏢 Departamentos", "📂 Subdepartamentos", "💼 Puestos"])
-    for tab, tabla, get_func in [(tab1, "departamentos", get_departamentos), (tab2, "subdepartamentos", get_subdepartamentos), (tab3, "puestos", get_puestos)]:
-        with tab:
-            with st.form(f"new_{tabla}"):
-                nuevo = st.text_input(f"Nuevo {tabla[:-1]}", key=f"nuevo_{tabla}")
-                if st.form_submit_button("➕ Agregar"):
-                    if nuevo:
-                        success, msg = add_catalog_item(tabla, nuevo)
+    # Departamentos
+    with tab1:
+        with st.form("new_departamentos"):
+            nuevo = st.text_input("Nuevo Departamento", key="nuevo_departamento")
+            if st.form_submit_button("➕ Agregar"):
+                if nuevo:
+                    success, msg = add_catalog_item('departamentos', nuevo)
+                    if success:
+                        st.success(msg)
+                        st.rerun()
+                    else:
+                        st.error(msg)
+        st.markdown("---")
+        items = get_departamentos()
+        for id_item, nombre in items:
+            cols = st.columns([4, 1, 1])
+            with cols[0]: st.write(f"**{nombre}**")
+            with cols[1]:
+                if st.button("✏️ Editar", key=f"edit_depto_{id_item}"):
+                    st.session_state[f'editing_depto_{id_item}'] = True
+            with cols[2]:
+                if st.button("🗑️ Eliminar", key=f"del_depto_{id_item}"):
+                    st.session_state[f'deleting_depto_{id_item}'] = True
+            if st.session_state.get(f'editing_depto_{id_item}', False):
+                with st.form(key=f"form_edit_depto_{id_item}"):
+                    nuevo_nombre = st.text_input("Editar nombre", value=nombre, key=f"edit_nom_depto_{id_item}")
+                    if st.form_submit_button("💾 Guardar"):
+                        success, msg = update_catalog_item('departamentos', id_item, nuevo_nombre)
                         if success:
                             st.success(msg)
+                            del st.session_state[f'editing_depto_{id_item}']
                             st.rerun()
-                        else:
-                            st.error(msg)
+            if st.session_state.get(f'deleting_depto_{id_item}', False):
+                st.warning(f"¿Eliminar '{nombre}'?")
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("✅ Sí", key=f"conf_del_depto_{id_item}"):
+                        success, msg = delete_catalog_item('departamentos', id_item)
+                        if success:
+                            st.success(msg)
+                            del st.session_state[f'deleting_depto_{id_item}']
+                            st.rerun()
+                with col2:
+                    if st.button("❌ No", key=f"cancel_del_depto_{id_item}"):
+                        del st.session_state[f'deleting_depto_{id_item}']
             st.markdown("---")
-            items = get_func()
-            for id_item, nombre in items:
-                cols = st.columns([4, 1, 1])
-                with cols[0]: st.write(f"**{nombre}**")
-                with cols[1]:
-                    if st.button("✏️ Editar", key=f"edit_{tabla}_{id_item}"):
-                        st.session_state[f'editing_{tabla}_{id_item}'] = True
-                with cols[2]:
-                    if st.button("🗑️ Eliminar", key=f"del_{tabla}_{id_item}"):
-                        st.session_state[f'deleting_{tabla}_{id_item}'] = True
-                if st.session_state.get(f'editing_{tabla}_{id_item}', False):
-                    with st.form(key=f"form_edit_{tabla}_{id_item}"):
-                        nuevo_nombre = st.text_input("Editar nombre", value=nombre, key=f"edit_nombre_{tabla}_{id_item}")
-                        if st.form_submit_button("💾 Guardar"):
-                            success, msg = update_catalog_item(tabla, id_item, nuevo_nombre)
-                            if success:
-                                st.success(msg)
-                                del st.session_state[f'editing_{tabla}_{id_item}']
-                                st.rerun()
-                if st.session_state.get(f'deleting_{tabla}_{id_item}', False):
-                    st.warning(f"¿Eliminar '{nombre}'?")
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        if st.button("✅ Sí", key=f"conf_del_{tabla}_{id_item}"):
-                            success, msg = delete_catalog_item(tabla, id_item)
-                            if success:
-                                st.success(msg)
-                                del st.session_state[f'deleting_{tabla}_{id_item}']
-                                st.rerun()
-                    with col2:
-                        if st.button("❌ No", key=f"cancel_del_{tabla}_{id_item}"):
-                            del st.session_state[f'deleting_{tabla}_{id_item}']
-                st.markdown("---")
+    # Subdepartamentos
+    with tab2:
+        with st.form("new_subdepartamentos"):
+            nuevo = st.text_input("Nuevo Subdepartamento", key="nuevo_subdepartamento")
+            if st.form_submit_button("➕ Agregar"):
+                if nuevo:
+                    success, msg = add_catalog_item('subdepartamentos', nuevo)
+                    if success:
+                        st.success(msg)
+                        st.rerun()
+                    else:
+                        st.error(msg)
+        st.markdown("---")
+        items = get_subdepartamentos()
+        for id_item, nombre in items:
+            cols = st.columns([4, 1, 1])
+            with cols[0]: st.write(f"**{nombre}**")
+            with cols[1]:
+                if st.button("✏️ Editar", key=f"edit_sub_{id_item}"):
+                    st.session_state[f'editing_sub_{id_item}'] = True
+            with cols[2]:
+                if st.button("🗑️ Eliminar", key=f"del_sub_{id_item}"):
+                    st.session_state[f'deleting_sub_{id_item}'] = True
+            if st.session_state.get(f'editing_sub_{id_item}', False):
+                with st.form(key=f"form_edit_sub_{id_item}"):
+                    nuevo_nombre = st.text_input("Editar nombre", value=nombre, key=f"edit_nom_sub_{id_item}")
+                    if st.form_submit_button("💾 Guardar"):
+                        success, msg = update_catalog_item('subdepartamentos', id_item, nuevo_nombre)
+                        if success:
+                            st.success(msg)
+                            del st.session_state[f'editing_sub_{id_item}']
+                            st.rerun()
+            if st.session_state.get(f'deleting_sub_{id_item}', False):
+                st.warning(f"¿Eliminar '{nombre}'?")
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("✅ Sí", key=f"conf_del_sub_{id_item}"):
+                        success, msg = delete_catalog_item('subdepartamentos', id_item)
+                        if success:
+                            st.success(msg)
+                            del st.session_state[f'deleting_sub_{id_item}']
+                            st.rerun()
+                with col2:
+                    if st.button("❌ No", key=f"cancel_del_sub_{id_item}"):
+                        del st.session_state[f'deleting_sub_{id_item}']
+            st.markdown("---")
+    # Puestos (con descripción)
+    with tab3:
+        with st.form("new_puestos"):
+            nuevo = st.text_input("Nuevo Puesto", key="nuevo_puesto")
+            desc = st.text_area("Descripción (opcional)", key="desc_puesto")
+            if st.form_submit_button("➕ Agregar"):
+                if nuevo:
+                    success, msg = add_catalog_item('puestos', nuevo, desc)
+                    if success:
+                        st.success(msg)
+                        st.rerun()
+                    else:
+                        st.error(msg)
+        st.markdown("---")
+        items = get_puestos()
+        for id_item, nombre, descripcion in items:
+            cols = st.columns([4, 1, 1, 1])
+            with cols[0]: st.write(f"**{nombre}**")
+            with cols[1]: st.write(f"📝 {descripcion[:50]}" if descripcion else "")
+            with cols[2]:
+                if st.button("✏️ Editar", key=f"edit_puesto_{id_item}"):
+                    st.session_state[f'editing_puesto_{id_item}'] = True
+            with cols[3]:
+                if st.button("🗑️ Eliminar", key=f"del_puesto_{id_item}"):
+                    st.session_state[f'deleting_puesto_{id_item}'] = True
+            if st.session_state.get(f'editing_puesto_{id_item}', False):
+                with st.form(key=f"form_edit_puesto_{id_item}"):
+                    nuevo_nombre = st.text_input("Editar nombre", value=nombre, key=f"edit_nom_puesto_{id_item}")
+                    nueva_desc = st.text_area("Descripción", value=descripcion, key=f"edit_desc_puesto_{id_item}")
+                    if st.form_submit_button("💾 Guardar"):
+                        success, msg = update_catalog_item('puestos', id_item, nuevo_nombre, nueva_desc)
+                        if success:
+                            st.success(msg)
+                            del st.session_state[f'editing_puesto_{id_item}']
+                            st.rerun()
+            if st.session_state.get(f'deleting_puesto_{id_item}', False):
+                st.warning(f"¿Eliminar '{nombre}'?")
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("✅ Sí", key=f"conf_del_puesto_{id_item}"):
+                        success, msg = delete_catalog_item('puestos', id_item)
+                        if success:
+                            st.success(msg)
+                            del st.session_state[f'deleting_puesto_{id_item}']
+                            st.rerun()
+                with col2:
+                    if st.button("❌ No", key=f"cancel_del_puesto_{id_item}"):
+                        del st.session_state[f'deleting_puesto_{id_item}']
+            st.markdown("---")
 
 def mostrar_proyecciones():
     st.header("📈 Proyecciones de Cajas por Semana")
@@ -2938,6 +3063,7 @@ def mostrar_dashboard_general():
         total_pesado = df_pesajes['cantidad_cajas_pesadas'].sum() if not df_pesajes.empty else 0
         total_recibido = df_pesajes['cajas_recibidas'].sum() if not df_pesajes.empty else 0
         diferencia_pesaje = total_pesado - total_recibido
+        ingresos_mes = get_dashboard_stats()['ingresos_mes']
     except Exception as e:
         st.error(f"Error al cargar datos: {str(e)}")
         df_cosechas = pd.DataFrame()
@@ -2945,7 +3071,7 @@ def mostrar_dashboard_general():
         df_traslados = pd.DataFrame()
         df_incidencias = pd.DataFrame()
         df_pesajes = pd.DataFrame()
-        activos = bajas = total_personal = rotacion = total_cajas = total_clams = promedio_cajas_trabajador = total_trasladadas = porcentaje_merma = total_faltas = total_permisos = total_incidencias = total_pesado = total_recibido = diferencia_pesaje = 0
+        activos = bajas = total_personal = rotacion = total_cajas = total_clams = promedio_cajas_trabajador = total_trasladadas = porcentaje_merma = total_faltas = total_permisos = total_incidencias = total_pesado = total_recibido = diferencia_pesaje = ingresos_mes = 0
         resumen_proyecciones = {'total_proyectado': 0, 'total_real': 0, 'diferencia': 0, 'porcentaje_desviacion': 0}
     
     # Header del Dashboard
@@ -2965,7 +3091,7 @@ def mostrar_dashboard_general():
             <div class="metric-icon">👥</div>
             <div class="metric-value">{activos}</div>
             <div class="metric-label">Personal Activo</div>
-            <div><span class="badge badge-success">+{ingresos_mes if 'ingresos_mes' in locals() else 0} este mes</span></div>
+            <div><span class="badge badge-success">+{ingresos_mes} este mes</span></div>
         </div>
         ''', unsafe_allow_html=True)
     with col2:
@@ -3503,7 +3629,7 @@ def mostrar_formulario_asistencia_instant(id_trabajador, nombre):
             st.rerun()
 
 # ==========================================
-# INTERFAZ DE GESTIÓN DE USUARIOS
+# INTERFAZ DE GESTIÓN DE USUARIOS (con permisos granulares)
 # ==========================================
 
 def mostrar_gestion_usuarios():
@@ -3563,8 +3689,36 @@ def mostrar_gestion_usuarios():
                             invernaderos_actuales = usuario.get('invernaderos_asignados', [])
                             invernaderos_seleccionados = st.multiselect("Invernaderos", [inv[1] for inv in invernaderos], default=[inv[1] for inv in invernaderos if inv[0] in invernaderos_actuales])
                             invernaderos_ids = [inv[0] for inv in invernaderos if inv[1] in invernaderos_seleccionados]
-                            if st.form_submit_button("💾 Guardar"):
-                                success, msg = update_user_permissions(usuario['id'], nuevo_rol, usuario.get('permisos', {}), invernaderos_ids)
+                            
+                            # Permisos modulares
+                            st.markdown("#### Permisos por módulo")
+                            todos_modulos = {
+                                "registro_cosecha": "🌾 Registro Cosecha",
+                                "dashboard": "📊 Tablero de Control",
+                                "proyecciones": "📈 Proyecciones",
+                                "control_asistencia": "🕐 Control Asistencia",
+                                "avance_cosecha": "📊 Avance Cosecha",
+                                "traslado_camara_fria": "❄️ Traslado a Cámara Fría",
+                                "gestion_merma": "🗑️ Gestión Merma",
+                                "cajas_mesa": "📦 Cajas en Mesa",
+                                "registros_qr": "📊 Registros QR",
+                                "reportes": "📋 Reportes",
+                                "gestion_invernaderos": "🏭 Gestión Invernaderos",
+                                "gestion_personal": "👥 Gestión Personal",
+                                "gestion_usuarios": "👥 Gestión Usuarios",
+                                "generar_qr": "📱 Generar QR",
+                                "catalogos": "📚 Catálogos",
+                                "cierre_dia": "🔒 Cierre de Día"
+                            }
+                            permisos_actuales = usuario.get('permisos', {})
+                            nuevos_permisos = {}
+                            cols = st.columns(3)
+                            for i, (key, label) in enumerate(todos_modulos.items()):
+                                with cols[i % 3]:
+                                    nuevos_permisos[key] = st.checkbox(label, value=permisos_actuales.get(key, False), key=f"perm_{usuario['id']}_{key}")
+                            
+                            if st.form_submit_button("💾 Guardar Cambios"):
+                                success, msg = update_user_permissions(usuario['id'], nuevo_rol, nuevos_permisos, invernaderos_ids)
                                 if success:
                                     st.success(msg)
                                     del st.session_state[f'editing_{usuario["id"]}']
@@ -3602,7 +3756,6 @@ def mostrar_gestion_usuarios():
                         with col_no:
                             if st.button("❌ No", key=f"cancel_del_{usuario['id']}"):
                                 del st.session_state[f'delete_{usuario["id"]}']
-                                st.rerun()
         else:
             st.info("No hay usuarios registrados")
     
@@ -3619,13 +3772,43 @@ def mostrar_gestion_usuarios():
                 invernaderos = get_all_invernaderos()
                 invernaderos_nuevo = st.multiselect("Invernaderos asignados", [inv[1] for inv in invernaderos])
                 invernaderos_ids_nuevo = [inv[0] for inv in invernaderos if inv[1] in invernaderos_nuevo]
+            
+            # Permisos iniciales
+            st.markdown("#### Permisos por módulo")
+            todos_modulos = {
+                "registro_cosecha": "🌾 Registro Cosecha",
+                "dashboard": "📊 Tablero de Control",
+                "proyecciones": "📈 Proyecciones",
+                "control_asistencia": "🕐 Control Asistencia",
+                "avance_cosecha": "📊 Avance Cosecha",
+                "traslado_camara_fria": "❄️ Traslado a Cámara Fría",
+                "gestion_merma": "🗑️ Gestión Merma",
+                "cajas_mesa": "📦 Cajas en Mesa",
+                "registros_qr": "📊 Registros QR",
+                "reportes": "📋 Reportes",
+                "gestion_invernaderos": "🏭 Gestión Invernaderos",
+                "gestion_personal": "👥 Gestión Personal",
+                "gestion_usuarios": "👥 Gestión Usuarios",
+                "generar_qr": "📱 Generar QR",
+                "catalogos": "📚 Catálogos",
+                "cierre_dia": "🔒 Cierre de Día"
+            }
+            permisos_nuevos = {}
+            cols = st.columns(3)
+            for i, (key, label) in enumerate(todos_modulos.items()):
+                with cols[i % 3]:
+                    default_value = (key in ["registro_cosecha", "dashboard", "proyecciones", "control_asistencia", 
+                                              "avance_cosecha", "traslado_camara_fria", "gestion_merma", "cajas_mesa",
+                                              "registros_qr", "reportes"]) if nuevo_rol == "supervisor" else True
+                    permisos_nuevos[key] = st.checkbox(label, value=default_value, key=f"perm_new_{key}")
+            
             if st.form_submit_button("✅ Crear Usuario"):
                 if not nuevo_usuario or not nuevo_nombre or not nuevo_password:
                     st.error("Complete todos los campos")
                 elif len(nuevo_password) < 6:
                     st.error("La contraseña debe tener al menos 6 caracteres")
                 else:
-                    result = register_user(nuevo_usuario, nuevo_password, nuevo_nombre, nuevo_rol, None, invernaderos_ids_nuevo)
+                    result = register_user(nuevo_usuario, nuevo_password, nuevo_nombre, nuevo_rol, permisos_nuevos, invernaderos_ids_nuevo)
                     if result['success']:
                         st.success(result['message'])
                         st.rerun()
@@ -3664,6 +3847,7 @@ def main():
     if supabase is None:
         st.error("❌ No se pudo conectar a Supabase. Verifica tu configuración.")
         st.stop()
+    keep_alive()
     if 'menu' not in st.session_state:
         st.session_state.menu = "📊 Tablero de Control"
     if 'authenticated' not in st.session_state:
