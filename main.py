@@ -70,39 +70,32 @@ st.set_page_config(
 )
 
 st.markdown("""
-    <style>
-    .stButton > button { width: 100%; border-radius: 10px; padding: 12px; font-weight: bold; margin-bottom: 8px; }
-    .stButton > button:hover { transform: translateX(5px); box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
-    .sidebar-title { text-align: center; padding: 20px 0; border-bottom: 2px solid #e0e0e0; margin-bottom: 20px; }
-    .sidebar-title h2 { color: #2c3e50; margin: 0; }
-    .user-info { padding: 10px; background: #f0f2f6; border-radius: 10px; margin-bottom: 20px; text-align: center; }
-    .kpi-card { background: linear-gradient(135deg, #1e3c2c 0%, #2a6b3c 100%); border-radius: 15px; padding: 15px; color: white; text-align: center; margin-bottom: 15px; }
-    .kpi-value { font-size: 28px; font-weight: bold; }
-    .kpi-label { font-size: 12px; opacity: 0.9; margin-top: 5px; }
-    .section-title { font-size: 24px; font-weight: bold; color: #1e3c2c; margin: 20px 0 15px 0; border-left: 4px solid #2a6b3c; padding-left: 15px; }
-    .date-card { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 12px; padding: 12px; text-align: center; }
-    .time-card { background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); border-radius: 12px; padding: 12px; text-align: center; }
-    .week-card { background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%); border-radius: 12px; padding: 12px; text-align: center; }
-    .login-container { max-width: 400px; margin: 100px auto; padding: 30px; background: white; border-radius: 15px; box-shadow: 0 4px 20px rgba(0,0,0,0.1); }
-    /* Mejoras visuales para dashboard */
-    .dashboard-header { background: linear-gradient(135deg, #1a472a 0%, #2d6a4f 100%); padding: 25px; border-radius: 20px; color: white; margin-bottom: 25px; text-align: center; }
-    .dashboard-header h1 { margin: 0; font-size: 28px; }
-    .dashboard-header p { margin: 10px 0 0 0; opacity: 0.9; }
-    .metric-card { background: white; border-radius: 20px; padding: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.08); text-align: center; transition: transform 0.2s; border: 1px solid #e8f0e8; }
-    .metric-card:hover { transform: translateY(-3px); box-shadow: 0 8px 25px rgba(0,0,0,0.12); }
-    .metric-value { font-size: 32px; font-weight: bold; color: #1a472a; }
-    .metric-label { font-size: 13px; color: #666; margin-top: 8px; text-transform: uppercase; letter-spacing: 0.5px; }
-    .metric-icon { font-size: 28px; margin-bottom: 10px; }
-    .progress-container { background: #f0f2f6; border-radius: 20px; padding: 15px; margin: 10px 0; }
-    .insight-box { background: #f8f9fa; border-radius: 15px; padding: 20px; border-left: 4px solid #2d6a4f; margin: 15px 0; }
-    .trend-up { color: #2ecc71; }
-    .trend-down { color: #e74c3c; }
-    .badge { display: inline-block; padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: bold; }
-    .badge-success { background: #d4edda; color: #155724; }
-    .badge-warning { background: #fff3cd; color: #856404; }
-    .badge-danger { background: #f8d7da; color: #721c24; }
-    .badge-info { background: #d1ecf1; color: #0c5460; }
-    </style>
+<style>
+.stButton > button { width: 100%; border-radius: 10px; padding: 12px; font-weight: bold; margin-bottom: 8px; }
+.stButton > button:hover { transform: translateX(5px); box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
+.sidebar-title { text-align: center; padding: 20px 0; border-bottom: 2px solid #e0e0e0; margin-bottom: 20px; }
+.sidebar-title h2 { color: #2c3e50; margin: 0; }
+.user-info { padding: 10px; background: #f0f2f6; border-radius: 10px; margin-bottom: 20px; text-align: center; }
+.kpi-card { background: linear-gradient(135deg, #1e3c2c 0%, #2a6b3c 100%); border-radius: 15px; padding: 15px; color: white; text-align: center; margin-bottom: 15px; }
+.kpi-value { font-size: 28px; font-weight: bold; }
+.kpi-label { font-size: 12px; opacity: 0.9; margin-top: 5px; }
+.section-title { font-size: 24px; font-weight: bold; color: #1e3c2c; margin: 20px 0 15px 0; border-left: 4px solid #2a6b3c; padding-left: 15px; }
+.date-card { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 12px; padding: 12px; text-align: center; }
+.time-card { background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); border-radius: 12px; padding: 12px; text-align: center; }
+.week-card { background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%); border-radius: 12px; padding: 12px; text-align: center; }
+.login-container { max-width: 400px; margin: 100px auto; padding: 30px; background: white; border-radius: 15px; box-shadow: 0 4px 20px rgba(0,0,0,0.1); }
+.dashboard-header { background: linear-gradient(135deg, #1a472a 0%, #2d6a4f 100%); padding: 25px; border-radius: 20px; color: white; margin-bottom: 25px; text-align: center; }
+.dashboard-header h1 { margin: 0; font-size: 28px; }
+.metric-card { background: white; border-radius: 20px; padding: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.08); text-align: center; transition: transform 0.2s; border: 1px solid #e8f0e8; }
+.metric-card:hover { transform: translateY(-3px); }
+.metric-value { font-size: 32px; font-weight: bold; color: #1a472a; }
+.metric-label { font-size: 13px; color: #666; margin-top: 8px; text-transform: uppercase; }
+.badge { display: inline-block; padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: bold; }
+.badge-success { background: #d4edda; color: #155724; }
+.badge-warning { background: #fff3cd; color: #856404; }
+.badge-danger { background: #f8d7da; color: #721c24; }
+.badge-info { background: #d1ecf1; color: #0c5460; }
+</style>
 """, unsafe_allow_html=True)
 
 REPORTE_TURNOS = ["Reporte 10:00am", "Reporte 12:00pm", "Reporte 02:00pm", "Reporte 03:00pm", "Reporte 04:00pm", "Reporte 05:00pm", "Reporte 06:00pm", "Reporte 07:00pm", "Reporte 08:00pm"]
@@ -110,10 +103,6 @@ REPORTE_TURNOS = ["Reporte 10:00am", "Reporte 12:00pm", "Reporte 02:00pm", "Repo
 # ==========================================
 # FUNCIONES DE AUTENTICACIÓN (con nombre de usuario)
 # ==========================================
-
-def hash_password(password):
-    """Genera un hash simple de la contraseña"""
-    return hashlib.sha256(password.encode()).hexdigest()
 
 def get_configuracion_sistema(clave):
     try:
@@ -127,13 +116,10 @@ def get_configuracion_sistema(clave):
 def register_user(nombre_usuario, password, nombre, rol='supervisor', permisos=None, invernaderos_asignados=None):
     try:
         nombre_usuario = nombre_usuario.strip().lower()
-        
-        # Verificar si el usuario ya existe
         existing = supabase.table('perfiles_usuario').select('id').eq('nombre_usuario', nombre_usuario).execute()
         if existing.data:
             return {'success': False, 'error': '❌ El nombre de usuario ya existe'}
         
-        # Crear usuario en auth con email temporal (para compatibilidad)
         email_temp = f"{nombre_usuario}@sistema.local"
         try:
             response = supabase.auth.sign_up({
@@ -145,7 +131,6 @@ def register_user(nombre_usuario, password, nombre, rol='supervisor', permisos=N
             })
             user_id = response.user.id if response.user else None
         except:
-            # Si falla, generamos un ID único
             user_id = hashlib.sha256(f"{nombre_usuario}{datetime.now()}".encode()).hexdigest()
         
         permisos_default = {
@@ -169,24 +154,17 @@ def register_user(nombre_usuario, password, nombre, rol='supervisor', permisos=N
         }).execute()
         
         return {'success': True, 'message': f'✅ Usuario {nombre} creado exitosamente'}
-        
     except Exception as e:
-        error_msg = str(e)
-        return {'success': False, 'error': f'Error: {error_msg}'}
+        return {'success': False, 'error': f'Error: {str(e)}'}
 
 def login_user(nombre_usuario, password):
     try:
         nombre_usuario = nombre_usuario.strip().lower()
-        
-        # Buscar el usuario por nombre_usuario
         perfil = supabase.table('perfiles_usuario').select('*').eq('nombre_usuario', nombre_usuario).eq('activo', True).execute()
-        
         if not perfil.data:
             return {'success': False, 'error': '❌ Usuario no encontrado'}
         
         usuario = perfil.data[0]
-        
-        # Verificar autenticación con Supabase Auth
         try:
             response = supabase.auth.sign_in_with_password({
                 "email": usuario['email'],
@@ -194,11 +172,9 @@ def login_user(nombre_usuario, password):
             })
             autenticado = response.user is not None
         except:
-            # Si falla la autenticación con email, intentamos solo con el perfil
-            # En producción, deberías tener los usuarios creados en Auth
-            autenticado = True  # Por ahora permitimos acceso si existe el perfil
+            autenticado = True  # Permitir acceso si existe perfil
         
-        if autenticado or True:  # Temporal: permitir acceso si existe perfil
+        if autenticado or True:
             return {
                 'success': True,
                 'user_id': usuario['id'],
@@ -211,7 +187,6 @@ def login_user(nombre_usuario, password):
             }
         else:
             return {'success': False, 'error': '❌ Contraseña incorrecta'}
-            
     except Exception as e:
         return {'success': False, 'error': f'Error: {str(e)}'}
 
@@ -277,7 +252,7 @@ def show_login_page():
             st.markdown('</div>', unsafe_allow_html=True)
 
 # ==========================================
-# FUNCIONES DE GESTIÓN DE USUARIOS (ACTUALIZADAS)
+# FUNCIONES DE GESTIÓN DE USUARIOS
 # ==========================================
 
 def get_all_users():
@@ -292,8 +267,7 @@ def update_user_permissions(user_id, rol, permisos, invernaderos_asignados):
         supabase.table('perfiles_usuario').update({
             'rol': rol, 
             'permisos': permisos, 
-            'invernaderos_asignados': invernaderos_asignados,
-            'updated_at': get_mexico_datetime().isoformat()
+            'invernaderos_asignados': invernaderos_asignados
         }).eq('id', user_id).execute()
         invalidar_cache()
         return True, "✅ Permisos actualizados correctamente"
@@ -311,17 +285,14 @@ def delete_user(user_id, nombre_usuario):
 
 def reset_user_password(user_id, new_password):
     try:
-        # Obtener el email del usuario
-        perfil = supabase.table('perfiles_usuario').select('email').eq('id', user_id).execute()
-        if perfil.data and perfil.data[0].get('email'):
-            supabase.auth.admin.update_user_by_id(user_id, {"password": new_password})
+        supabase.auth.admin.update_user_by_id(user_id, {"password": new_password})
         return True, "✅ Contraseña actualizada correctamente"
     except Exception as e:
         return False, f"❌ No se pudo cambiar la contraseña: {str(e)}"
 
 def toggle_user_status(user_id, activo):
     try:
-        supabase.table('perfiles_usuario').update({'activo': activo, 'updated_at': get_mexico_datetime().isoformat()}).eq('id', user_id).execute()
+        supabase.table('perfiles_usuario').update({'activo': activo}).eq('id', user_id).execute()
         invalidar_cache()
         return True, f"✅ Usuario {'activado' if activo else 'desactivado'} correctamente"
     except Exception as e:
@@ -3090,7 +3061,6 @@ def mostrar_dashboard_general():
         col1, col2 = st.columns([2, 1])
         with col1:
             if not df_avance_filtrado.empty:
-                # Gráfico de barras de avance
                 fig = px.bar(df_avance_filtrado, x='invernadero_nombre', y='porcentaje', 
                             title='Porcentaje de Avance por Invernadero',
                             labels={'invernadero_nombre': 'Invernadero', 'porcentaje': 'Avance (%)'},
