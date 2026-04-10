@@ -13,4 +13,4 @@ openpyxl
 streamlit-webrtc
 pytz
 av
-pip install streamlit pandas supabase pyzbar qrcode pillow opencv-python-headless plotly reportlab python-dateutil
+pip
