@@ -520,10 +520,20 @@ def add_worker(data):
         depto_id = get_id_by_nombre("departamentos", data['departamento'])
         sub_id = get_id_by_nombre("subdepartamentos", data['subdepartamento'])
         puesto_id = get_id_by_nombre("puestos", data['puesto'])
+        # Convertir fecha a string ISO
+        fecha_alta_str = data['fa'].isoformat() if hasattr(data['fa'], 'isoformat') else str(data['fa'])
         supabase.table('trabajadores').insert({
-            'apellido_paterno': data['ap'], 'apellido_materno': data['am'], 'nombre': data['nom'],
-            'correo': data['cor'], 'telefono': data['tel'], 'fecha_alta': data['fa'], 'estatus': 'activo',
-            'departamento_id': depto_id, 'subdepartamento_id': sub_id, 'tipo_nomina': data['tn'], 'puesto_id': puesto_id
+            'apellido_paterno': data['ap'],
+            'apellido_materno': data['am'],
+            'nombre': data['nom'],
+            'correo': data['cor'],
+            'telefono': data['tel'],
+            'fecha_alta': fecha_alta_str,
+            'estatus': 'activo',
+            'departamento_id': depto_id,
+            'subdepartamento_id': sub_id,
+            'tipo_nomina': data['tn'],
+            'puesto_id': puesto_id
         }).execute()
         invalidar_cache()
         return True, "✅ Trabajador guardado correctamente"
@@ -548,7 +558,13 @@ def update_worker(worker_id, data):
 
 def dar_baja(worker_id, fecha_baja):
     try:
-        supabase.table('trabajadores').update({'estatus': 'baja', 'fecha_baja': fecha_baja, 'updated_at': get_mexico_datetime().isoformat()}).eq('id', worker_id).execute()
+        # Convertir fecha a string ISO
+        fecha_baja_str = fecha_baja.isoformat() if hasattr(fecha_baja, 'isoformat') else str(fecha_baja)
+        supabase.table('trabajadores').update({
+            'estatus': 'baja',
+            'fecha_baja': fecha_baja_str,
+            'updated_at': get_mexico_datetime().isoformat()
+        }).eq('id', worker_id).execute()
         invalidar_cache()
         return True, f"✅ Trabajador dado de baja correctamente"
     except Exception as e:
