@@ -507,22 +507,33 @@ def get_id_by_nombre(tabla, nombre):
 
 def get_all_workers():
     try:
-        result = supabase.table('trabajadores').select("""
-            id, nombre, apellido_paterno, apellido_materno, correo, telefono, estatus, fecha_alta, fecha_baja, tipo_nomina,
-            departamentos:departamento_id (nombre), subdepartamentos:subdepartamento_id (nombre), puestos:puesto_id (nombre, descripcion)
-        """).eq('estatus', 'activo').order('apellido_paterno').execute()
+        # Consulta simple: solo la tabla trabajadores, sin joins
+        result = supabase.table('trabajadores').select('*').execute()
+        
+        if not result.data:
+            st.warning("No se encontraron trabajadores en la base de datos.")
+            return pd.DataFrame()
+        
         data = []
         for row in result.data:
             data.append({
-                'id': row['id'], 'nombre': row['nombre'], 'apellido_paterno': row['apellido_paterno'],
-                'apellido_materno': row['apellido_materno'] or '', 'correo': row['correo'] or '', 'telefono': row['telefono'] or '',
-                'estatus': row['estatus'], 'fecha_alta': row['fecha_alta'], 'fecha_baja': row['fecha_baja'],
-                'departamento': row['departamentos']['nombre'] if row['departamentos'] else 'Sin asignar',
-                'subdepartamento': row['subdepartamentos']['nombre'] if row['subdepartamentos'] else 'Sin asignar',
-                'puesto': row['puestos']['nombre'] if row['puestos'] else 'Sin asignar', 'tipo_nomina': row['tipo_nomina']
+                'id': row['id'],
+                'nombre': row.get('nombre', ''),
+                'apellido_paterno': row.get('apellido_paterno', ''),
+                'apellido_materno': row.get('apellido_materno', ''),
+                'correo': row.get('correo', ''),
+                'telefono': row.get('telefono', ''),
+                'estatus': row.get('estatus', 'activo'),
+                'fecha_alta': row.get('fecha_alta'),
+                'fecha_baja': row.get('fecha_baja'),
+                'departamento': 'Sin asignar',  # Valor por defecto
+                'subdepartamento': 'Sin asignar',
+                'puesto': 'Sin asignar',
+                'tipo_nomina': row.get('tipo_nomina', 'especial')
             })
         return pd.DataFrame(data)
     except Exception as e:
+        st.error(f"Error al obtener trabajadores: {str(e)}")
         return pd.DataFrame()
 
 def get_worker_by_id(worker_id):
