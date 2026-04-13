@@ -558,29 +558,18 @@ def get_worker_by_id(worker_id):
     except:
         return None
 
-def add_worker(data):
+def get_all_workers():
     try:
-        depto_id = get_id_by_nombre("departamentos", data['departamento'])
-        sub_id = get_id_by_nombre("subdepartamentos", data['subdepartamento'])
-        puesto_id = get_id_by_nombre("puestos", data['puesto'])
-        fecha_alta_str = data['fa'].isoformat() if hasattr(data['fa'], 'isoformat') else str(data['fa'])
-        supabase.table('trabajadores').insert({
-            'apellido_paterno': data['ap'],
-            'apellido_materno': data['am'],
-            'nombre': data['nom'],
-            'correo': data['cor'],
-            'telefono': data['tel'],
-            'fecha_alta': fecha_alta_str,
-            'estatus': 'activo',
-            'departamento_id': depto_id,
-            'subdepartamento_id': sub_id,
-            'tipo_nomina': data['tn'],
-            'puesto_id': puesto_id
-        }).execute()
-        invalidar_cache()
-        return True, "✅ Trabajador guardado correctamente"
+        result = supabase.table('trabajadores').select('*').execute()
+        st.write("DEBUG: result.data =", result.data)  # 👈 Ver qué devuelve
+        st.write("DEBUG: result error =", getattr(result, 'error', None))  # 👈 Si hay error
+        if not result.data:
+            st.warning("No se encontraron trabajadores en la base de datos.")
+            return pd.DataFrame()
+        # ... resto igual
     except Exception as e:
-        return False, f"❌ Error al guardar: {str(e)}"
+        st.error(f"Error al obtener trabajadores: {str(e)}")
+        return pd.DataFrame()
 
 def update_worker(worker_id, data):
     try:
