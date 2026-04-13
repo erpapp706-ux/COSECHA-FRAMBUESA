@@ -1661,31 +1661,6 @@ def generar_qr_trabajador_simple(id_trabajador, nombre, url_base="http://localho
     img_bytes.seek(0)
     return img_bytes
 
-def mostrar_generar_qr():
-    st.header("🔧 Generar Códigos QR")
-    # ... (código de URL base, etc.)
-
-    # === PRUEBA DE CONEXIÓN ===
-    try:
-        # Contar registros sin filtros
-        count_result = supabase.table('trabajadores').select('id', count='exact').execute()
-        st.info(f"🔍 Total de registros en tabla 'trabajadores' (según count): {count_result.count}")
-        
-        # Traer todos los registros sin límite
-        all_result = supabase.table('trabajadores').select('*').execute()
-        st.write(f"📋 Registros devueltos: {len(all_result.data)}")
-        if all_result.data:
-            st.dataframe(pd.DataFrame(all_result.data))
-        else:
-            st.warning("No se encontraron registros con SELECT *")
-    except Exception as e:
-        st.error(f"Error en prueba: {e}")
-    # === FIN PRUEBA ===
-
-    # Luego el resto de tu código...
-    trabajadores = get_all_workers()
-    # ...
-
 # ==========================================
 # FUNCIONES DE DASHBOARD Y REPORTES
 # ==========================================
