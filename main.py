@@ -1656,7 +1656,7 @@ def generar_qr_trabajador_simple(id_trabajador, nombre, url_base="http://localho
     qr.add_data(url)
     qr.make(fit=True)
     img = qr.make_image(fill_color="black", back_color="white")
-    img_bytes = io.BytesIO()
+    img_bytes = io.BytesIO()   # ← Corregido
     img.save(img_bytes, format='PNG')
     img_bytes.seek(0)
     return img_bytes
