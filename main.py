@@ -54,6 +54,7 @@ def init_supabase() -> Client:
             return None
 
 supabase = init_supabase()
+st.write("🔗 Conectado a Supabase URL:", st.secrets["SUPABASE_URL"])
 
 # ==========================================
 # FUNCIÓN PARA MANTENER SESIÓN ACTIVA
