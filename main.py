@@ -61,8 +61,6 @@ supabase = init_supabase()
 def keep_alive():
     if 'last_activity' not in st.session_state:
         st.session_state.last_activity = time.time()
-    # No es necesario hacer más, Streamlit ya maneja el tiempo de espera,
-    # pero con esta función evitamos que el caché se limpie agresivamente.
 
 # ==========================================
 # HASH DE CONTRASEÑAS
@@ -170,9 +168,6 @@ def login_user(nombre_usuario, password):
         if 'password_hash' in usuario:
             if usuario['password_hash'] != hash_password(password):
                 return {'success': False, 'error': '❌ Contraseña incorrecta'}
-        else:
-            # Si no existe hash (migración), se permite pero se recomienda actualizar
-            pass
         
         return {
             'success': True,
@@ -498,7 +493,7 @@ def delete_catalog_item(tabla, item_id):
 
 def get_id_by_nombre(tabla, nombre):
     try:
-        result = supabase.table(tabla).select('id').eq('nombre', nombre).execute()
+        result = supabase.table(tabla).select('id').ilike('nombre', nombre.strip()).execute()
         if result.data:
             return result.data[0]['id']
         return None
@@ -507,7 +502,7 @@ def get_id_by_nombre(tabla, nombre):
 
 def get_all_workers():
     try:
-        
+        result = supabase.table('trabajadores').select('*').execute()
         if not result.data:
             st.warning("No se encontraron trabajadores en la base de datos.")
             return pd.DataFrame()
@@ -524,11 +519,15 @@ def get_all_workers():
                 'estatus': row.get('estatus', 'activo'),
                 'fecha_alta': row.get('fecha_alta'),
                 'fecha_baja': row.get('fecha_baja'),
-                'departamento': 'Sin asignar',  # Valor por defecto
+                'departamento': 'Sin asignar',
                 'subdepartamento': 'Sin asignar',
                 'puesto': 'Sin asignar',
                 'tipo_nomina': row.get('tipo_nomina', 'especial')
-  
+            })
+        return pd.DataFrame(data)
+    except Exception as e:
+        st.error(f"Error al obtener trabajadores: {str(e)}")
+        return pd.DataFrame()
 
 def get_worker_by_id(worker_id):
     try:
@@ -552,18 +551,37 @@ def get_worker_by_id(worker_id):
     except:
         return None
 
-def get_all_workers():
+def add_worker(data):
     try:
-        result = supabase.table('trabajadores').select('*').execute()
-        st.write("DEBUG: result.data =", result.data)  # 👈 Ver qué devuelve
-        st.write("DEBUG: result error =", getattr(result, 'error', None))  # 👈 Si hay error
-        if not result.data:
-            st.warning("No se encontraron trabajadores en la base de datos.")
-            return pd.DataFrame()
-        # ... resto igual
+        depto_id = get_id_by_nombre("departamentos", data['departamento'])
+        sub_id = get_id_by_nombre("subdepartamentos", data['subdepartamento'])
+        puesto_id = get_id_by_nombre("puestos", data['puesto'])
+        
+        if depto_id is None:
+            return False, f"❌ Departamento '{data['departamento']}' no existe en catálogos"
+        if sub_id is None:
+            return False, f"❌ Subdepartamento '{data['subdepartamento']}' no existe"
+        if puesto_id is None:
+            return False, f"❌ Puesto '{data['puesto']}' no existe"
+        
+        fecha_alta_str = data['fa'].isoformat() if hasattr(data['fa'], 'isoformat') else str(data['fa'])
+        supabase.table('trabajadores').insert({
+            'apellido_paterno': data['ap'].strip().upper(),
+            'apellido_materno': data['am'].strip().upper() if data['am'] else None,
+            'nombre': data['nom'].strip().upper(),
+            'correo': data['cor'].strip() if data['cor'] else None,
+            'telefono': data['tel'].strip() if data['tel'] else None,
+            'fecha_alta': fecha_alta_str,
+            'estatus': 'activo',
+            'departamento_id': depto_id,
+            'subdepartamento_id': sub_id,
+            'tipo_nomina': data['tn'],
+            'puesto_id': puesto_id
+        }).execute()
+        invalidar_cache()
+        return True, "✅ Trabajador guardado correctamente"
     except Exception as e:
-        st.error(f"Error al obtener trabajadores: {str(e)}")
-        return pd.DataFrame()
+        return False, f"❌ Error al guardar: {str(e)}"
 
 def update_worker(worker_id, data):
     try:
@@ -1213,6 +1231,8 @@ def get_resumen_asistencia_dia(fecha=None):
         fecha = get_mexico_date()
     try:
         trabajadores = get_all_workers()
+        if trabajadores.empty:
+            return pd.DataFrame()
         asistencias = supabase.table('asistencia').select("*, invernaderos:invernadero_id (nombre)").eq('fecha', fecha.isoformat()).execute()
         asis_dict = {row['trabajador_id']: row for row in asistencias.data}
         descansos = supabase.table('descansos').select('*').eq('fecha', fecha.isoformat()).execute()
@@ -1650,7 +1670,7 @@ def generar_qr_trabajador_simple(id_trabajador, nombre, url_base="http://localho
     qr.add_data(url)
     qr.make(fit=True)
     img = qr.make_image(fill_color="black", back_color="white")
-    img_bytes = io.BytesIO()   # ← Corregido
+    img_bytes = io.BytesIO()
     img.save(img_bytes, format='PNG')
     img_bytes.seek(0)
     return img_bytes
@@ -3235,8 +3255,8 @@ def mostrar_dashboard_general():
                                      mode='lines+markers', name='Trasladado', 
                                      line=dict(color='#3498db', width=3)))
         if not df_pesajes.empty:
-            df_p_diario = df_pesajes.groupby('fecha')['cantidad_cajas_pesadas'].sum().reset_index().sort_values('fecha')
-            fig.add_trace(go.Scatter(x=df_p_diario['fecha'], y=df_p_diario['cantidad_cajas_pesadas'], 
+            df_p_diario = df_pesajes.groupby('fecha')['cajas_pesadas'].sum().reset_index().sort_values('fecha')
+            fig.add_trace(go.Scatter(x=df_p_diario['fecha'], y=df_p_diario['cajas_pesadas'], 
                                      mode='lines+markers', name='Pesado', 
                                      line=dict(color='#e74c3c', width=3)))
         fig.update_layout(title='Evolución Diaria de Producción', 
