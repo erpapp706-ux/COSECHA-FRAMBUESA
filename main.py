@@ -54,7 +54,6 @@ def init_supabase() -> Client:
             return None
 
 supabase = init_supabase()
-st.write("🔗 Conectado a Supabase URL:", st.secrets["SUPABASE_URL"])
 
 # ==========================================
 # FUNCIÓN PARA MANTENER SESIÓN ACTIVA
@@ -508,8 +507,6 @@ def get_id_by_nombre(tabla, nombre):
 
 def get_all_workers():
     try:
-        # Consulta simple: solo la tabla trabajadores, sin joins
-        result = supabase.table('trabajadores').select('*').execute()
         
         if not result.data:
             st.warning("No se encontraron trabajadores en la base de datos.")
@@ -531,11 +528,7 @@ def get_all_workers():
                 'subdepartamento': 'Sin asignar',
                 'puesto': 'Sin asignar',
                 'tipo_nomina': row.get('tipo_nomina', 'especial')
-            })
-        return pd.DataFrame(data)
-    except Exception as e:
-        st.error(f"Error al obtener trabajadores: {str(e)}")
-        return pd.DataFrame()
+  
 
 def get_worker_by_id(worker_id):
     try:
